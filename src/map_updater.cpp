@@ -5,7 +5,7 @@
  * This code is a ROS 2 adaptation of the map_updater module.
  */
 
-#include "map_updater.h"  // 包含转换后的 .hpp 文件
+#include "map_updater.hpp"  // 包含转换后的 .hpp 文件
 
 #include <dirent.h>
 #include <pcl/common/transforms.h>

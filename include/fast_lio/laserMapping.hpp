@@ -1,4 +1,3 @@
-// src/laserMapping.hpp
 #ifndef LASER_MAPPING_HPP
 #define LASER_MAPPING_HPP
 
@@ -9,8 +8,10 @@
 #include <chrono>
 #include <csignal>
 #include <deque>
+#include <filesystem>
 #include <fstream>
-#include <iomanip>  // For std::setw
+#include <functional>
+#include <iomanip>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -19,8 +20,10 @@
 // ROS 2
 #include <tf2_ros/transform_broadcaster.h>
 
+#include <geometry_msgs/msg/pose_with_covariance_stamped.hpp>
 #include <geometry_msgs/msg/transform_stamped.hpp>
 #include <geometry_msgs/msg/vector3.hpp>
+#include <image_transport/image_transport.hpp>
 #include <livox_ros_driver2/msg/custom_msg.hpp>
 #include <nav_msgs/msg/odometry.hpp>
 #include <nav_msgs/msg/path.hpp>
@@ -29,6 +32,7 @@
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <std_srvs/srv/trigger.hpp>
 #include <visualization_msgs/msg/marker.hpp>
+#include <visualization_msgs/msg/marker_array.hpp>
 
 // PCL
 #include <pcl/filters/voxel_grid.h>
@@ -47,10 +51,12 @@
 #include <ikd-Tree/ikd_Tree.h>
 
 #include "IMU_Processing.hpp"
+#include "map_updater.hpp"
 #include "preprocess.h"
-#include "use-ikfom.hpp"  // 必须包含以定义 state_ikfom 等类型
+#include "use-ikfom.hpp"
+#include "voxel_map.hpp"
 
-// 宏定义保持不变
+// 宏定义
 #define INIT_TIME (0.1)
 #define LASER_POINT_COV (0.001)
 #define MAXN (720000)
@@ -58,44 +64,53 @@
 
 class LaserMappingNode : public rclcpp::Node {
  public:
+  EIGEN_MAKE_ALIGNED_OPERATOR_NEW
   explicit LaserMappingNode(
       const rclcpp::NodeOptions& options = rclcpp::NodeOptions());
   ~LaserMappingNode();
 
-  // 静态实例指针，用于在静态回调函数（如 h_share_model,
-  // SigHandle）中访问实例成员
   static LaserMappingNode* ptr_;
-
-  // 信号处理函数包装器
   static void OnSignal(int sig);
 
  private:
-  // --- 核心逻辑函数 (原全局函数转为成员函数) ---
-  void timer_callback();
-  void map_publish_callback();
-  void map_save_callback(std_srvs::srv::Trigger::Request::ConstSharedPtr req,
-                         std_srvs::srv::Trigger::Response::SharedPtr res);
+  // --- 初始化函数 (此前缺失声明) ---
+  void readParameters();
+  void initializeSubscribersAndPublishers();
+  void initializeFiles();
+  void initializeComponents();  // 如果cpp中有用到
 
-  // 传感器回调
+  // --- 核心流程 ---
+  void timer_callback();
+
+  // --- 回调函数 ---
   void standard_pcl_cbk(const sensor_msgs::msg::PointCloud2::UniquePtr msg);
   void livox_pcl_cbk(const livox_ros_driver2::msg::CustomMsg::UniquePtr msg);
   void imu_cbk(const sensor_msgs::msg::Imu::UniquePtr msg_in);
 
-  // 算法辅助函数
+  void initialPoseCallback(
+      const geometry_msgs::msg::PoseWithCovarianceStamped::SharedPtr msg);
+
+  // [修复] 补充声明服务回调和发布回调
+  void map_save_callback(
+      const std::shared_ptr<std_srvs::srv::Trigger::Request> req,
+      std::shared_ptr<std_srvs::srv::Trigger::Response> res);
+  void map_publish_callback();
+
+  // --- 算法辅助 ---
   bool sync_packages(MeasureGroup& meas);
   void lasermap_fov_segment();
   void map_incremental();
-  void points_cache_collect();
+  void points_cache_collect();  // [修复] 补充声明
 
-  // 坐标变换
-  void pointBodyToWorld(PointType const* const pi, PointType* const po);
+  // --- 坐标变换 ---
   template <typename T>
   void pointBodyToWorld(const Eigen::Matrix<T, 3, 1>& pi,
                         Eigen::Matrix<T, 3, 1>& po);
+  void pointBodyToWorld(PointType const* const pi, PointType* const po);
   void RGBpointBodyToWorld(PointType const* const pi, PointType* const po);
   void RGBpointBodyLidarToIMU(PointType const* const pi, PointType* const po);
 
-  // 发布与日志
+  // --- 发布与显示 ---
   void publish_frame_world(
       rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub);
   void publish_frame_body(
@@ -108,10 +123,15 @@ class LaserMappingNode : public rclcpp::Node {
       const rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pubOdom,
       std::unique_ptr<tf2_ros::TransformBroadcaster>& tf_br);
   void publish_path(rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr pubPath);
-  void save_to_pcd();
+
+  // --- 地图更新与对齐 ---
+  bool loadExistingMap(const std::string& map_path);
+  void periodicAlignment();
+  void savePCD();
+
+  // [修复] 确保此函数在 cpp 中被实现
   void dump_lio_state_to_log(FILE* fp);
 
-  // [FIX 1] 添加丢失的 set_posestamp 模板函数
   template <typename T>
   void set_posestamp(T& out) {
     out.pose.position.x = state_point.pos(0);
@@ -123,13 +143,10 @@ class LaserMappingNode : public rclcpp::Node {
     out.pose.orientation.w = geoQuat.w;
   }
 
-  // EKF 测量模型 (必须是静态的以匹配函数指针签名)
   static void h_share_model(state_ikfom& s,
                             esekfom::dyn_share_datastruct<double>& ekfom_data);
 
  private:
-  // --- 成员变量 (原全局变量) ---
-
   // ROS 通信
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr
       pubLaserCloudFull_;
@@ -140,24 +157,40 @@ class LaserMappingNode : public rclcpp::Node {
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubLaserCloudMap_;
   rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pubOdomAftMapped_;
   rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr pubPath_;
+
+  rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr
+      pub_original_map_kept_;
+  rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr
+      pub_newly_added_map_;
+  rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr
+      pub_deleted_points_;
+  rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr
+      pub_final_updated_map_;
+
+  rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr
+      voxel_map_pub_;
+
   rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr sub_imu_;
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr sub_pcl_pc_;
   rclcpp::Subscription<livox_ros_driver2::msg::CustomMsg>::SharedPtr
       sub_pcl_livox_;
+  rclcpp::Subscription<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr
+      sub_initial_pose_;
+
   std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
   rclcpp::TimerBase::SharedPtr timer_;
   rclcpp::TimerBase::SharedPtr map_pub_timer_;
   rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr map_save_srv_;
 
-  // 算法对象
   std::shared_ptr<Preprocess> p_pre;
   std::shared_ptr<ImuProcess> p_imu;
   esekfom::esekf<state_ikfom, 12, input_ikfom> kf;
   KD_TREE<PointType> ikdtree;
-  pcl::VoxelGrid<PointType> downSizeFilterSurf;
-  pcl::VoxelGrid<PointType> downSizeFilterMap;
 
-  // 状态变量
+  std::unique_ptr<MapUpdater> map_updater_;
+  std::shared_ptr<VoxelMapManager> voxelmap_manager;
+  std::unordered_map<VOXEL_LOCATION, VoxelOctoTree*> voxel_map;
+
   state_ikfom state_point;
   MeasureGroup Measures;
   vect3 pos_lid;
@@ -166,7 +199,6 @@ class LaserMappingNode : public rclcpp::Node {
   geometry_msgs::msg::Quaternion geoQuat;
   geometry_msgs::msg::PoseStamped msg_body_pose;
 
-  // 点云指针
   PointCloudXYZI::Ptr featsFromMap;
   PointCloudXYZI::Ptr feats_undistort;
   PointCloudXYZI::Ptr feats_down_body;
@@ -178,14 +210,19 @@ class LaserMappingNode : public rclcpp::Node {
   PointCloudXYZI::Ptr pcl_wait_pub;
   PointCloudXYZI::Ptr pcl_wait_save;
 
-  // 缓冲区与锁
+  PointCloudXYZRGB::Ptr original_map_visual_;
+  PointCloudXYZRGB::Ptr deleted_points_visual_;
+
   std::deque<double> time_buffer;
   std::deque<PointCloudXYZI::Ptr> lidar_buffer;
   std::deque<sensor_msgs::msg::Imu::ConstSharedPtr> imu_buffer;
   std::mutex mtx_buffer;
   std::condition_variable sig_buffer;
+  std::mutex mtx_initial_pose;
 
-  // 配置参数
+  pcl::VoxelGrid<PointType> downSizeFilterSurf;
+  pcl::VoxelGrid<PointType> downSizeFilterMap;
+
   std::string root_dir = ROOT_DIR;
   std::string map_file_path, lid_topic, imu_topic;
   bool runtime_pos_log = false, pcd_save_en = false, time_sync_en = false,
@@ -203,7 +240,29 @@ class LaserMappingNode : public rclcpp::Node {
   int pcd_save_interval = -1, pcd_index = 0;
   int NUM_MAX_ITERATIONS = 0;
 
-  // 运行时变量
+  bool is_update_mode_ = false;
+  std::string map_data_path_;
+  bool initial_pose_received_ = false;
+  bool initial_align_finished_ = false;
+  Sophus::SE3d initial_pose_;
+  Sophus::SE3d last_kf_pose_;
+
+  std::vector<KeyframeData> original_map_keyframes_;
+  std::vector<KeyframeData> new_keyframes_all_;
+  std::vector<KeyframeData> new_keyframes_;
+  MapUpdater::VoxelMapIndexType voxel_map_index;
+
+  int motion_keyframe_count_ = 0;
+  int periodic_align_interval_ = 20;
+  double periodic_align_min_dist_ = 0.3;
+  double keyframe_search_radius_ = 2.0;
+  double point_replacement_radius_ = 0.1;
+  double pcd_save_distance_thresh_ = 0.2;
+  V3D last_pcd_save_pos_ = V3D::Zero();
+  bool is_first_pcd_saved_ = false;
+  bool colmap_output_en = false;
+  double filter_size_pcd = 0.2;
+
   double kdtree_incremental_time = 0.0, kdtree_search_time = 0.0,
          kdtree_delete_time = 0.0;
   double match_time = 0, solve_time = 0, solve_const_H_time = 0;
@@ -211,8 +270,6 @@ class LaserMappingNode : public rclcpp::Node {
   double last_timestamp_lidar = 0, last_timestamp_imu = -1.0;
   double epsi[23] = {0.001};
 
-  // 大型数组 (考虑是否改为 std::vector,
-  // 但为了保持绝对一致性，这里保留定长数组定义，改为成员)
   float res_last[100000] = {0.0};
   bool point_selected_surf[100000] = {0};
   double T1[MAXN], s_plot[MAXN], s_plot2[MAXN], s_plot3[MAXN], s_plot4[MAXN],
@@ -229,19 +286,15 @@ class LaserMappingNode : public rclcpp::Node {
   bool lidar_pushed = false, flg_first_scan = true, flg_exit = false,
        flg_EKF_inited = false;
   bool is_first_lidar = true;
-  bool timediff_set_flg = false;
-  double timediff_lidar_wrt_imu = 0.0;
   double lidar_mean_scantime = 0.0;
-  int scan_num = 0;  // 用于 sync_packages
+  int scan_num = 0;
 
-  // 向量
   std::vector<std::vector<int>> pointSearchInd_surf;
   std::vector<BoxPointType> cub_needrm;
   std::vector<PointVector> Nearest_Points;
   std::vector<double> extrinT;
   std::vector<double> extrinR;
 
-  // 辅助变量
   V3F XAxisPoint_body;
   V3F XAxisPoint_world;
   V3D euler_cur;
@@ -250,16 +303,13 @@ class LaserMappingNode : public rclcpp::Node {
   BoxPointType LocalMap_Points;
   bool Localmap_Initialized = false;
 
-  // 调试日志文件
-  std::ofstream fout_pre, fout_out, fout_dbg;
+  std::ofstream fout_pre, fout_out, fout_dbg, fout_pcd_pos;
   FILE* fp = nullptr;
 
-  // 性能统计变量
   double aver_time_consu = 0, aver_time_icp = 0, aver_time_match = 0,
          aver_time_incre = 0, aver_time_solve = 0, aver_time_const_H_time = 0;
 };
 
-// 模板函数实现必须在头文件中
 template <typename T>
 void LaserMappingNode::pointBodyToWorld(const Eigen::Matrix<T, 3, 1>& pi,
                                         Eigen::Matrix<T, 3, 1>& po) {
@@ -267,7 +317,6 @@ void LaserMappingNode::pointBodyToWorld(const Eigen::Matrix<T, 3, 1>& pi,
   V3D p_global(state_point.rot * (state_point.offset_R_L_I * p_body +
                                   state_point.offset_T_L_I) +
                state_point.pos);
-
   po[0] = p_global(0);
   po[1] = p_global(1);
   po[2] = p_global(2);

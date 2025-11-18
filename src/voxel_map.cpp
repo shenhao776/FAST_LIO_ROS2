@@ -2,7 +2,7 @@
  * ROS 2 Port of FAST-LIVO2 Voxel Map
  */
 
-#include "voxel_map.h"
+#include "voxel_map.hpp"
 
 #include <tf2/LinearMath/Quaternion.h>
 

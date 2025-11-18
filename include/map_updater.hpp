@@ -30,7 +30,7 @@
 
 // Local Headers
 #include "common_lib.h"
-#include "voxel_map.h"  // 引用新创建的头文件
+#include "voxel_map.hpp"  // 引用新创建的头文件
 
 // 类型定义
 // 注意：PointType 等已在 common_lib.h 中定义，这里做兼容处理
