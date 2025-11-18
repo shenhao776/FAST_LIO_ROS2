@@ -1,5 +1,5 @@
 // src/IMU_Processing.cpp
-#include "IMU_Processing.hpp"
+#include "fast_lio/IMU_Processing.hpp"
 
 // 实现辅助函数
 bool time_list(PointType& x, PointType& y) {

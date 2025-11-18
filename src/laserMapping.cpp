@@ -34,7 +34,7 @@
 // POSSIBILITY OF SUCH DAMAGE.
 
 // src/laserMapping.cpp
-#include "laserMapping.hpp"
+#include "fast_lio/laserMapping.hpp"
 
 // 初始化静态成员
 LaserMappingNode* LaserMappingNode::ptr_ = nullptr;
