@@ -111,10 +111,17 @@ rosidl_generate_interfaces(${PROJECT_NAME}
 )
 ament_export_dependencies(rosidl_default_runtime)
 
-add_executable(fastlio_mapping src/laserMapping.cpp include/ikd-Tree/ikd_Tree.cpp src/preprocess.cpp)
+# [FIX] 将 src/IMU_Processing.cpp 添加到可执行文件
+add_executable(fastlio_mapping 
+  src/laserMapping.cpp 
+  src/IMU_Processing.cpp
+  include/ikd-Tree/ikd_Tree.cpp 
+  src/preprocess.cpp
+)
 
 target_include_directories(fastlio_mapping PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
   $<INSTALL_INTERFACE:include>
   ${PCL_INCLUDE_DIRS}
   # === [添加] 头文件路径 ===
