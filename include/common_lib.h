@@ -6,28 +6,19 @@
 #include <so3_math.h>
 
 #include <Eigen/Eigen>
+#include <builtin_interfaces/msg/time.hpp>
 #include <fast_lio/msg/pose6_d.hpp>
 #include <nav_msgs/msg/odometry.hpp>
+#include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/imu.hpp>
 
-// [FIX] 包含 rclcpp::Time 和 builtin_interfaces::msg::Time
-#include <builtin_interfaces/msg/time.hpp>
-#include <rclcpp/rclcpp.hpp>
-
-// === LIVO 扩展库 ===
-// #include <sophus/se3.h>
-// #include <tf2_ros/transform_broadcaster.h>
-// #include <utils/color.h>  //
-// 需确保项目中有此文件，或者你可以删除此行如果不需要特定颜色定义 #include
-// <utils/types.h>  // 需确保项目中有此文件
-
-// #include <cstdarg>
-// #include <cstdio>
-// #include <deque>
-// #include <iostream>
-// #include <opencv2/opencv.hpp>
-// #include <string>
-// #include <vector>
+// [FIX] 添加标准库头文件
+#include <cstdarg>
+#include <cstdio>
+#include <deque>
+#include <iostream>
+#include <string>
+#include <vector>
 
 using namespace std;
 using namespace Eigen;
@@ -116,7 +107,6 @@ typedef Matrix3f M3F;
 #define MF(a, b) Matrix<float, (a), (b)>
 #define VF(a) Matrix<float, (a), 1>
 
-// [FIX] 使用 inline 关键字 (C++17) 允许多重定义
 inline M3D Eye3d(M3D::Identity());
 inline M3F Eye3f(M3F::Identity());
 inline V3D Zero3d(0, 0, 0);
@@ -278,7 +268,6 @@ bool esti_normvector(Matrix<T, 3, 1>& normvec, const PointVector& point,
   return true;
 }
 
-// [FIX] 使用 inline 关键字
 inline float calc_dist(PointType p1, PointType p2) {
   float d = (p1.x - p2.x) * (p1.x - p2.x) + (p1.y - p2.y) * (p1.y - p2.y) +
             (p1.z - p2.z) * (p1.z - p2.z);
@@ -317,12 +306,10 @@ bool esti_plane(Matrix<T, 4, 1>& pca_result, const PointVector& point,
   return true;
 }
 
-// [FIX] 使用 inline 关键字
 inline double get_time_sec(const builtin_interfaces::msg::Time& time) {
   return rclcpp::Time(time).seconds();
 }
 
-// [FIX] 使用 inline 关键字
 inline rclcpp::Time get_ros_time(double timestamp) {
   int32_t sec = std::floor(timestamp);
   auto nanosec_d = (timestamp - std::floor(timestamp)) * 1e9;

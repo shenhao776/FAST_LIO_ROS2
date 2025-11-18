@@ -5,14 +5,13 @@ if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Release)
 endif()
 
- ADD_COMPILE_OPTIONS(-std=c++17) 
- ADD_COMPILE_OPTIONS(-std=c++17) 
- set(CMAKE_CXX_FLAGS "-std=c++17 -O3") 
+ADD_COMPILE_OPTIONS(-std=c++17) 
+set(CMAKE_CXX_FLAGS "-std=c++17 -O3") 
   
- add_definitions(-DROOT_DIR=\"${CMAKE_CURRENT_SOURCE_DIR}/\") 
+add_definitions(-DROOT_DIR=\"${CMAKE_CURRENT_SOURCE_DIR}/\") 
   
- set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fexceptions") 
- set(CMAKE_CXX_STANDARD 17) 
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fexceptions") 
+set(CMAKE_CXX_STANDARD 17) 
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++14 -pthread -std=c++0x -std=c++14 -fexceptions")
@@ -85,14 +84,12 @@ set(dependencies
   pcl_ros
   pcl_conversions
   livox_ros_driver2
-  # === [添加] 新增的ROS依赖 ===
   tf2
   tf2_ros
   tf2_eigen
   tf2_geometry_msgs
   cv_bridge
   image_transport
-  # ==========================
 )
 
 # Thirdparty libraries
@@ -111,12 +108,13 @@ rosidl_generate_interfaces(${PROJECT_NAME}
 )
 ament_export_dependencies(rosidl_default_runtime)
 
-# [FIX] 将 src/IMU_Processing.cpp 添加到可执行文件
 add_executable(fastlio_mapping 
   src/laserMapping.cpp 
-  src/IMU_Processing.cpp
-  include/ikd-Tree/ikd_Tree.cpp 
   src/preprocess.cpp
+  src/IMU_Processing.cpp
+  src/map_updater.cpp 
+  src/voxel_map.cpp
+  include/ikd-Tree/ikd_Tree.cpp 
 )
 
 target_include_directories(fastlio_mapping PUBLIC
@@ -124,28 +122,28 @@ target_include_directories(fastlio_mapping PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
   $<INSTALL_INTERFACE:include>
   ${PCL_INCLUDE_DIRS}
-  # === [添加] 头文件路径 ===
-  ${Sophus_INCLUDE_DIRS}
+  ${Sophus_INCLUDE_DIRS} 
   ${OpenCV_INCLUDE_DIRS}
   ${cv_bridge_INCLUDE_DIRS}
-  # =======================
 )
+
+# 如果系统中的 Sophus 是新版 (targets)，需要链接 Sophus::Sophus
+if(TARGET Sophus::Sophus)
+    target_link_libraries(fastlio_mapping Sophus::Sophus)
+endif()
 
 target_link_libraries(fastlio_mapping 
   ${PCL_LIBRARIES} 
   ${PYTHON_LIBRARIES} 
   Eigen3::Eigen
-  # === [添加] 链接库 ===
-  ${Sophus_LIBRARIES}
   ${OpenCV_LIBRARIES}
-  # ===================
 )
+
 target_include_directories(fastlio_mapping PRIVATE ${PYTHON_INCLUDE_DIRS})
 
 list(APPEND EOL_LIST "foxy" "galactic" "eloquent" "dashing" "crystal")
 
 if($ENV{ROS_DISTRO} IN_LIST EOL_LIST)
-  # Custommsg to support foxy & galactic
   rosidl_target_interfaces(fastlio_mapping
     ${PROJECT_NAME} "rosidl_typesupport_cpp")
 else()
