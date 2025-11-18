@@ -10,8 +10,69 @@
 #include <nav_msgs/msg/odometry.hpp>
 #include <sensor_msgs/msg/imu.hpp>
 
+// === LIVO 扩展库 ===
+// #include <sophus/se3.h>
+// #include <tf2_ros/transform_broadcaster.h>
+// #include <utils/color.h>  //
+// 需确保项目中有此文件，或者你可以删除此行如果不需要特定颜色定义 #include
+// <utils/types.h>  // 需确保项目中有此文件
+
+// #include <cstdarg>
+// #include <cstdio>
+// #include <deque>
+// #include <iostream>
+// #include <opencv2/opencv.hpp>
+// #include <string>
+// #include <vector>
+
 using namespace std;
 using namespace Eigen;
+
+// ==================================================================
+// =================== LIVO 日志输出宏 ===================
+// ==================================================================
+
+#define ANSI_COLOR_RED "\x1b[31m"
+#define ANSI_COLOR_YELLOW "\x1b[33m"
+#define ANSI_COLOR_BLUE "\x1b[34m"
+#define ANSI_COLOR_RESET "\x1b[0m"
+
+inline std::string format_string_for_log(const char* format, ...) {
+  char buffer[2048];
+  va_list args;
+  va_start(args, format);
+  vsnprintf(buffer, sizeof(buffer), format, args);
+  va_end(args);
+  return std::string(buffer);
+}
+
+#define LOG_INFO(message)                                                   \
+  std::cout << "[" << __FILE__ << ":" << __LINE__ << "] [INFO] " << message \
+            << std::endl;
+
+#define LOG_WARN(message)                                                      \
+  std::cout << "[" << __FILE__ << ":" << __LINE__ << "] " << ANSI_COLOR_YELLOW \
+            << "[WARN] " << message << ANSI_COLOR_RESET << std::endl;
+
+#define LOG_ERROR(message)                                                  \
+  std::cerr << "[" << __FILE__ << ":" << __LINE__ << "] " << ANSI_COLOR_RED \
+            << "[ERROR] " << message << ANSI_COLOR_RESET << std::endl;
+
+#define LOG_INFO_F(format, ...)                                  \
+  std::cout << "[" << __FILE__ << ":" << __LINE__ << "] [INFO] " \
+            << format_string_for_log(format, ##__VA_ARGS__) << std::endl;
+
+#define LOG_WARN_F(format, ...)                                                \
+  std::cout << "[" << __FILE__ << ":" << __LINE__ << "] " << ANSI_COLOR_YELLOW \
+            << "[WARN] " << format_string_for_log(format, ##__VA_ARGS__)       \
+            << ANSI_COLOR_RESET << std::endl;
+
+#define LOG_ERROR_F(format, ...)                                            \
+  std::cerr << "[" << __FILE__ << ":" << __LINE__ << "] " << ANSI_COLOR_RED \
+            << "[ERROR] " << format_string_for_log(format, ##__VA_ARGS__)   \
+            << ANSI_COLOR_RESET << std::endl;
+
+// ==================================================================
 
 #define USE_IKFOM
 
@@ -33,6 +94,9 @@ using namespace Eigen;
   vector<decltype(mat)::Scalar>(mat.data(), \
                                 mat.data() + mat.rows() * mat.cols())
 #define DEBUG_FILE_DIR(name) (string(string(ROOT_DIR) + "Log/" + name))
+
+enum SLAM_MODE { ONLY_LO = 0, ONLY_LIO = 1, LIVO = 2 };
+enum EKF_STATE { WAIT = 0, VIO = 1, LIO = 2, LO = 3 };
 
 typedef fast_lio::msg::Pose6D Pose6D;
 typedef pcl::PointXYZINormal PointType;

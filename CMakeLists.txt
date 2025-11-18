@@ -61,6 +61,17 @@ find_package(pcl_ros REQUIRED)
 find_package(pcl_conversions REQUIRED)
 find_package(livox_ros_driver2 REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
+find_package(OpenCV REQUIRED)
+
+# === [添加] 新增的依赖包 ===
+find_package(tf2 REQUIRED)
+find_package(tf2_ros REQUIRED)
+find_package(tf2_eigen REQUIRED)
+find_package(tf2_geometry_msgs REQUIRED)
+find_package(cv_bridge REQUIRED)
+find_package(image_transport REQUIRED)
+find_package(Sophus REQUIRED)
+# ==========================
 
 set(dependencies
   rclcpp
@@ -74,6 +85,14 @@ set(dependencies
   pcl_ros
   pcl_conversions
   livox_ros_driver2
+  # === [添加] 新增的ROS依赖 ===
+  tf2
+  tf2_ros
+  tf2_eigen
+  tf2_geometry_msgs
+  cv_bridge
+  image_transport
+  # ==========================
 )
 
 # Thirdparty libraries
@@ -93,12 +112,27 @@ rosidl_generate_interfaces(${PROJECT_NAME}
 ament_export_dependencies(rosidl_default_runtime)
 
 add_executable(fastlio_mapping src/laserMapping.cpp include/ikd-Tree/ikd_Tree.cpp src/preprocess.cpp)
+
 target_include_directories(fastlio_mapping PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>
   ${PCL_INCLUDE_DIRS}
+  # === [添加] 头文件路径 ===
+  ${Sophus_INCLUDE_DIRS}
+  ${OpenCV_INCLUDE_DIRS}
+  ${cv_bridge_INCLUDE_DIRS}
+  # =======================
 )
-target_link_libraries(fastlio_mapping ${PCL_LIBRARIES} ${PYTHON_LIBRARIES} Eigen3::Eigen)
+
+target_link_libraries(fastlio_mapping 
+  ${PCL_LIBRARIES} 
+  ${PYTHON_LIBRARIES} 
+  Eigen3::Eigen
+  # === [添加] 链接库 ===
+  ${Sophus_LIBRARIES}
+  ${OpenCV_LIBRARIES}
+  # ===================
+)
 target_include_directories(fastlio_mapping PRIVATE ${PYTHON_INCLUDE_DIRS})
 
 list(APPEND EOL_LIST "foxy" "galactic" "eloquent" "dashing" "crystal")
