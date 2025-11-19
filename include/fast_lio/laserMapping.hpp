@@ -223,7 +223,6 @@ class LaserMappingNode : public rclcpp::Node {
   pcl::VoxelGrid<PointType> downSizeFilterSurf;
   pcl::VoxelGrid<PointType> downSizeFilterMap;
 
-  std::string root_dir = ROOT_DIR;
   std::string map_file_path, lid_topic, imu_topic;
   bool runtime_pos_log = false, pcd_save_en = false, time_sync_en = false,
        extrinsic_est_en = true, path_en = true;

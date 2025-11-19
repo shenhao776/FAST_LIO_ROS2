@@ -62,38 +62,27 @@ LaserMappingNode::LaserMappingNode(const rclcpp::NodeOptions& options)
   map_updater_ = std::make_unique<MapUpdater>(voxel_config, Lidar_R_wrt_IMU,
                                               Lidar_T_wrt_IMU);
 
-  initializeFiles();  // 初始化文件路径
-
   // [逻辑] 检查并加载现有地图
   std::string pose_file = map_data_path_ + "/result/localization_output.txt";
+  LOG_INFO_F("\033[1;32mChecking for existing map data at: %s\033[0m",
+             pose_file.c_str());
   if (std::filesystem::exists(pose_file)) {
     is_update_mode_ = true;
-    RCLCPP_INFO(this->get_logger(),
-                "\033[1;32mMap data found. Running in UPDATE mode.\033[0m");
+    LOG_INFO_F("\033[1;32mMap data found. Running in UPDATE mode.\033[0m");
 
     // 构建索引
     if (!map_updater_->buildVoxelMapIndex(map_data_path_, voxel_map_index,
                                           original_map_keyframes_)) {
-      RCLCPP_ERROR(this->get_logger(), "Failed to build map index.");
+      LOG_ERROR_F("Failed to build map index.");
     }
     // 加载用于 Rviz 显示的地图
     loadExistingMap(map_data_path_);
   } else {
     is_update_mode_ = false;
-    RCLCPP_INFO(this->get_logger(),
-                "\033[1;32mNo map data found. Running in MAPPING mode.\033[0m");
+    LOG_INFO_F("\033[1;32mNo map data found. Running in MAPPING mode.\033[0m");
   }
 
-  // 文件操作
-  std::string pos_log_dir = root_dir + "/Log/pos_log.txt";
-  fp = fopen(pos_log_dir.c_str(), "w");
-  fout_pre.open(DEBUG_FILE_DIR("mat_pre.txt"), std::ios::out);
-  fout_out.open(DEBUG_FILE_DIR("mat_out.txt"), std::ios::out);
-  fout_dbg.open(DEBUG_FILE_DIR("dbg.txt"), std::ios::out);
-  if (pcd_save_interval > 0)
-    fout_pcd_pos.open(std::string(ROOT_DIR) + "Log/PCD/scans_pos.json",
-                      std::ios::out);
-
+  initializeFiles();  // 初始化文件路径
   initializeSubscribersAndPublishers();
 
   FOV_DEG = (fov_deg + 10.0) > 179.9 ? 179.9 : (fov_deg + 10.0);
@@ -103,7 +92,7 @@ LaserMappingNode::LaserMappingNode(const rclcpp::NodeOptions& options)
   downSizeFilterMap.setLeafSize(filter_size_map_min, filter_size_map_min,
                                 filter_size_map_min);
 
-  RCLCPP_INFO(this->get_logger(), "Node init finished.");
+  LOG_INFO_F("Node init finished.");
 }
 
 LaserMappingNode::~LaserMappingNode() {
@@ -128,16 +117,14 @@ void LaserMappingNode::initializeComponents() {
 
 void LaserMappingNode::initializeFiles() {
   if (is_update_mode_) {
-    RCLCPP_INFO(this->get_logger(),
-                "Update mode: Preserving existing map data in %s",
-                map_data_path_.c_str());
+    LOG_INFO_F("Update mode: Preserving existing map data in %s",
+               map_data_path_.c_str());
     if (!std::filesystem::exists(map_data_path_)) {
       std::filesystem::create_directories(map_data_path_);
     }
   } else {
-    RCLCPP_INFO(this->get_logger(),
-                "[WARN] Mapping mode: Cleaning up old data in %s",
-                map_data_path_.c_str());
+    LOG_INFO_F("[WARN] Mapping mode: Cleaning up old data in %s",
+               map_data_path_.c_str());
     std::string rm_cmd = "rm -rf " + map_data_path_;
     // [修复] 忽略 system 返回值警告
     (void)system(rm_cmd.c_str());
@@ -204,7 +191,7 @@ void LaserMappingNode::readParameters() {
   declare_and_get("pcd_save.pcd_save_en", pcd_save_en, false);
   declare_and_get("pcd_save.interval", pcd_save_interval, -1);
   declare_and_get("pcd_save.map_data_path", map_data_path_,
-                  std::string(ROOT_DIR) + "Log");
+                  "/root/shared_files/dataset/my_map_data");
   declare_and_get("pcd_save.pcd_save_distance_thresh",
                   pcd_save_distance_thresh_, 0.2);
   declare_and_get("pcd_save.filter_size_pcd", filter_size_pcd, 0.5);
@@ -355,7 +342,7 @@ void LaserMappingNode::timer_callback() {
         state_point.pos = initial_pose_.translation();
         kf.change_x(state_point);
         initial_align_finished_ = true;
-        RCLCPP_INFO(this->get_logger(), "Initial alignment finished.");
+        LOG_INFO_F("Initial alignment finished.");
       }
 
       if (initial_align_finished_) {
@@ -558,9 +545,7 @@ void LaserMappingNode::periodicAlignment() {
 
     ikdtree = KD_TREE<PointType>();
 
-    RCLCPP_INFO(
-        this->get_logger(),
-        "Periodic alignment success. Correction applied and map reset.");
+    LOG_INFO_F("Periodic alignment success. Correction applied and map reset.");
   }
 
   new_keyframes_all_.insert(new_keyframes_all_.end(), new_keyframes_.begin(),
@@ -591,7 +576,7 @@ void LaserMappingNode::initialPoseCallback(
     initial_pose_ = Sophus::SE3d(q, p);
     if (!initial_pose_received_) {
       initial_pose_received_ = true;
-      RCLCPP_INFO(this->get_logger(), "Received initial pose guess.");
+      LOG_INFO_F("Received initial pose guess.");
     }
   }
 }
@@ -610,8 +595,7 @@ void LaserMappingNode::savePCD() {
     std::string save_path = map_data_path_ + "/PCD/final_map.pcd";
     std::filesystem::create_directories(map_data_path_ + "/PCD/");
     pcl::io::savePCDFileBinary(save_path, *final_cloud);
-    RCLCPP_INFO(this->get_logger(), "Saved merged map to %s",
-                save_path.c_str());
+    LOG_INFO_F("Saved merged map to %s", save_path.c_str());
   } else {
     std::string raw_points_dir = map_data_path_ + "/PCD/all_raw_points.pcd";
     pcl::PCDWriter pcd_writer;
@@ -623,7 +607,7 @@ void LaserMappingNode::map_save_callback(
     const std::shared_ptr<std_srvs::srv::Trigger::Request> req,
     std::shared_ptr<std_srvs::srv::Trigger::Response> res) {
   (void)req;
-  RCLCPP_INFO(this->get_logger(), "Service /save_map called.");
+  LOG_INFO_F("Service /save_map called.");
   savePCD();
   res->success = true;
   res->message = "Map saved.";
