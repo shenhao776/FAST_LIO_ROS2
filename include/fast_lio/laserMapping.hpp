@@ -91,7 +91,7 @@ class LaserMappingNode : public rclcpp::Node {
       const geometry_msgs::msg::PoseWithCovarianceStamped::SharedPtr msg);
 
   // [修复] 补充声明服务回调和发布回调
-  void map_save_callback(
+  void saveMapCallback(
       const std::shared_ptr<std_srvs::srv::Trigger::Request> req,
       std::shared_ptr<std_srvs::srv::Trigger::Response> res);
   void map_publish_callback();
@@ -224,8 +224,8 @@ class LaserMappingNode : public rclcpp::Node {
   pcl::VoxelGrid<PointType> downSizeFilterMap;
 
   std::string map_file_path, lid_topic, imu_topic;
-  bool runtime_pos_log = false, pcd_save_en = false, time_sync_en = false,
-       extrinsic_est_en = true, path_en = true;
+  bool pcd_save_en = false, time_sync_en = false, extrinsic_est_en = true,
+       path_en = true;
   bool scan_pub_en = false, dense_pub_en = false, scan_body_pub_en = false;
   bool effect_pub_en = false, map_pub_en = false;
   double gyr_cov = 0.1, acc_cov = 0.1, b_gyr_cov = 0.0001, b_acc_cov = 0.0001;

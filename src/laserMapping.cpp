@@ -1,8 +1,29 @@
-// src/laserMapping.cpp
+/* This file is part of FAST-LIVO2: Fast, Direct LiDAR-Inertial-Visual Odometry.
+
+Developer: Chunran Zheng <zhengcr@connect.hku.hk>
+
+For commercial use, please contact me at <zhengcr@connect.hku.hk> or
+Prof. Fu Zhang at <fuzhang@hku.hk>.
+
+This file is subject to the terms and conditions outlined in the 'LICENSE' file,
+which is included as part of this source code package.
+
+Modified by: SHEN HAO
+Email: shenhao776@gmail.com
+
+This code is a modified version of the FAST-LIVO2 framework.
+Original repository: https://github.com/hku-mars/FAST-LIVO2
+*/
+
 #include "fast_lio/laserMapping.hpp"
 
+#include <pcl/filters/extract_indices.h>
 #include <tf2/LinearMath/Quaternion.h>
 
+#include <atomic>
+#include <filesystem>
+#include <fstream>
+#include <iostream>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 
 LaserMappingNode* LaserMappingNode::ptr_ = nullptr;
@@ -44,45 +65,46 @@ LaserMappingNode::LaserMappingNode(const rclcpp::NodeOptions& options)
 
   readParameters();
 
-  // [新增] 初始化组件
   initializeComponents();
 
   std::fill(epsi, epsi + 23, 0.001);
   kf.init_dyn_share(get_f, df_dx, df_dw, h_share_model, NUM_MAX_ITERATIONS,
                     epsi);
 
-  // 初始化 VoxelMapConfig 用于 MapUpdater 和 VoxelMapManager
+  // Initialize VoxelMapConfig
   VoxelMapConfig voxel_config;
-  loadVoxelConfig(this, voxel_config);  // 使用外部的 helper 或成员函数加载
+  loadVoxelConfig(this, voxel_config);
 
-  // 初始化 VoxelMapManager (需要传递 voxel_map 引用)
+  // Initialize VoxelMapManager
   voxelmap_manager.reset(new VoxelMapManager(voxel_config, voxel_map));
 
-  // 初始化 MapUpdater
+  // Initialize MapUpdater
   map_updater_ = std::make_unique<MapUpdater>(voxel_config, Lidar_R_wrt_IMU,
                                               Lidar_T_wrt_IMU);
 
-  // [逻辑] 检查并加载现有地图
+  // Check and load existing map
   std::string pose_file = map_data_path_ + "/result/localization_output.txt";
-  LOG_INFO_F("\033[1;32mChecking for existing map data at: %s\033[0m",
-             pose_file.c_str());
   if (std::filesystem::exists(pose_file)) {
     is_update_mode_ = true;
-    LOG_INFO_F("\033[1;32mMap data found. Running in UPDATE mode.\033[0m");
+    LOG_INFO_F("\033[1;32mMap data found at %s. Running in UPDATE mode.\033[0m",
+               map_data_path_.c_str());
 
-    // 构建索引
+    // Build Index from existing map
     if (!map_updater_->buildVoxelMapIndex(map_data_path_, voxel_map_index,
                                           original_map_keyframes_)) {
       LOG_ERROR_F("Failed to build map index.");
     }
-    // 加载用于 Rviz 显示的地图
-    loadExistingMap(map_data_path_);
+
+    // Load visualization map
+    if (!loadExistingMap(map_data_path_)) {
+      LOG_WARN_F("Failed to load visualization map.");
+    }
   } else {
     is_update_mode_ = false;
     LOG_INFO_F("\033[1;32mNo map data found. Running in MAPPING mode.\033[0m");
   }
 
-  initializeFiles();  // 初始化文件路径
+  initializeFiles();
   initializeSubscribersAndPublishers();
 
   FOV_DEG = (fov_deg + 10.0) > 179.9 ? 179.9 : (fov_deg + 10.0);
@@ -104,7 +126,6 @@ LaserMappingNode::~LaserMappingNode() {
   if (ptr_ == this) ptr_ = nullptr;
 }
 
-// [修复] 初始化组件函数
 void LaserMappingNode::initializeComponents() {
   Lidar_T_wrt_IMU << VEC_FROM_ARRAY(extrinT);
   Lidar_R_wrt_IMU << MAT_FROM_ARRAY(extrinR);
@@ -116,31 +137,29 @@ void LaserMappingNode::initializeComponents() {
 }
 
 void LaserMappingNode::initializeFiles() {
+  // 确保目录存在
+  std::string root_dir_path = map_data_path_;
+  if (!std::filesystem::exists(root_dir_path)) {
+    std::filesystem::create_directories(root_dir_path);
+  }
+
   if (is_update_mode_) {
     LOG_INFO_F("Update mode: Preserving existing map data in %s",
                map_data_path_.c_str());
-    if (!std::filesystem::exists(map_data_path_)) {
-      std::filesystem::create_directories(map_data_path_);
-    }
   } else {
     LOG_INFO_F("[WARN] Mapping mode: Cleaning up old data in %s",
                map_data_path_.c_str());
-    std::string rm_cmd = "rm -rf " + map_data_path_;
-    // [修复] 忽略 system 返回值警告
+    // 仅在建图模式下清理旧数据
+    std::string rm_cmd = "rm -rf " + map_data_path_ + "/*";  // 保留目录本身
     (void)system(rm_cmd.c_str());
-
-    std::filesystem::create_directories(map_data_path_);
-
-    if (pcd_save_en) {
-      std::string pcd_dir = map_data_path_ + "/PCD/";
-      std::filesystem::create_directories(pcd_dir);
-    }
-
-    std::string result_dir = map_data_path_ + "/result/";
-    std::filesystem::create_directories(result_dir);
-    std::string keyframes_dir = result_dir + "keyframes/";
-    std::filesystem::create_directories(keyframes_dir);
   }
+
+  // 创建必要的子目录
+  std::filesystem::create_directories(map_data_path_ + "/PCD");
+  std::filesystem::create_directories(map_data_path_ + "/result/keyframes");
+  std::filesystem::create_directories(map_data_path_ +
+                                      "/result/images");  // 如果需要保存图片
+  std::filesystem::create_directories(map_data_path_ + "/Log");
 }
 
 void LaserMappingNode::readParameters() {
@@ -197,12 +216,15 @@ void LaserMappingNode::readParameters() {
   declare_and_get("pcd_save.filter_size_pcd", filter_size_pcd, 0.5);
 
   declare_and_get("max_iteration", NUM_MAX_ITERATIONS, 4);
-  declare_and_get("runtime_pos_log_enable", runtime_pos_log, false);
 
   declare_and_get("online_update.periodic_align_interval",
                   periodic_align_interval_, 20);
   declare_and_get("online_update.periodic_align_min_dist",
                   periodic_align_min_dist_, 0.3);
+  declare_and_get("online_update.keyframe_search_radius",
+                  keyframe_search_radius_, 3.0);
+  declare_and_get("online_update.point_replacement_radius",
+                  point_replacement_radius_, 0.5);
 }
 
 void LaserMappingNode::initializeSubscribersAndPublishers() {
@@ -244,7 +266,7 @@ void LaserMappingNode::initializeSubscribersAndPublishers() {
   pubPath_ = this->create_publisher<nav_msgs::msg::Path>("/path", 20);
   tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
 
-  // 新增地图相关的发布者
+  // 地图更新相关的发布者
   pub_original_map_kept_ =
       this->create_publisher<sensor_msgs::msg::PointCloud2>(
           "/map/original_map_kept", rclcpp::QoS(1).transient_local());
@@ -256,10 +278,8 @@ void LaserMappingNode::initializeSubscribersAndPublishers() {
       this->create_publisher<sensor_msgs::msg::PointCloud2>(
           "/map/final_updated_map", rclcpp::QoS(1).transient_local());
 
-  // VoxelMap 可视化
   voxel_map_pub_ = this->create_publisher<visualization_msgs::msg::MarkerArray>(
       "/planes", 100);
-  // 将 publisher 传递给 manager (因为 manager 没有 node handle)
   if (voxelmap_manager) voxelmap_manager->voxel_map_pub_ = voxel_map_pub_;
 
   auto period_ms =
@@ -273,11 +293,11 @@ void LaserMappingNode::initializeSubscribersAndPublishers() {
       this, this->get_clock(), map_period_ms,
       std::bind(&LaserMappingNode::map_publish_callback, this));
 
+  // 将服务回调绑定到 saveMapCallback
   map_save_srv_ = this->create_service<std_srvs::srv::Trigger>(
-      "map_save", std::bind(&LaserMappingNode::map_save_callback, this,
+      "map_save", std::bind(&LaserMappingNode::saveMapCallback, this,
                             std::placeholders::_1, std::placeholders::_2));
 
-  // 如果有初始地图，发布一次
   if (is_update_mode_ && original_map_visual_ &&
       !original_map_visual_->empty()) {
     sensor_msgs::msg::PointCloud2 map_msg;
@@ -335,38 +355,70 @@ void LaserMappingNode::timer_callback() {
       return;
     }
 
+    // --- Update Mode: Initial Alignment Logic ---
+    LOG_INFO_F("is_update_mode_: %d, initial_align_finished_: %d",
+               is_update_mode_, initial_align_finished_);
     if (is_update_mode_) {
       if (!initial_align_finished_) {
-        if (!initial_pose_received_) return;
-        state_point.rot = initial_pose_.so3().unit_quaternion();
-        state_point.pos = initial_pose_.translation();
-        kf.change_x(state_point);
-        initial_align_finished_ = true;
-        LOG_INFO_F("Initial alignment finished.");
-      }
-
-      if (initial_align_finished_) {
-        KeyframeData new_kf;
-        new_kf.timestamp = Measures.lidar_beg_time;
-        new_kf.pose =
-            Sophus::SE3d(state_point.rot.toRotationMatrix(), state_point.pos);
-        new_kf.cloud.reset(
-            new PointCloudXYZI(*feats_undistort));  // 使用去畸变后的点云
-        new_keyframes_.push_back(new_kf);
-
-        if (new_keyframes_.size() == 1) {
-          last_kf_pose_ = new_kf.pose;
-          motion_keyframe_count_++;
-        } else {
-          Sophus::SE3d delta = last_kf_pose_.inverse() * new_kf.pose;
-          if (delta.translation().norm() > periodic_align_min_dist_) {
-            motion_keyframe_count_++;
-            last_kf_pose_ = new_kf.pose;
-          }
+        if (!initial_pose_received_) {
+          static int log_cnt = 0;
+          if (log_cnt++ % 50 == 0)
+            LOG_INFO_F("Waiting for initial pose from /pcl_pose...");
+          return;
         }
-        periodicAlignment();
+
+        LOG_INFO_F("Performing initial ICP alignment using pose guess...");
+        PointCloudXYZI::Ptr current_frame_world(new PointCloudXYZI());
+
+        Eigen::Matrix4d T_guess = initial_pose_.matrix();
+        pcl::transformPointCloud(*feats_undistort, *current_frame_world,
+                                 T_guess);
+
+        KeyframeData temp_kf;
+        temp_kf.pose = initial_pose_;
+        temp_kf.cloud.reset(new PointCloudXYZI(*feats_undistort));
+        std::vector<KeyframeData> temp_kfs = {temp_kf};
+
+        PointCloudXYZI::Ptr target_cloud = map_updater_->findTargetPointsForICP(
+            temp_kfs, voxel_map_index, original_map_keyframes_, 30.0);
+
+        if (target_cloud->empty()) {
+          LOG_WARN_F("Initial Alignment: Target cloud empty.");
+          return;
+        }
+
+        pcl::IterativeClosestPoint<PointType, PointType> icp;
+        icp.setInputSource(current_frame_world);
+        icp.setInputTarget(target_cloud);
+        icp.setMaxCorrespondenceDistance(1.0);
+        icp.setMaximumIterations(100);
+
+        PointCloudXYZI unused_result;
+        icp.align(unused_result);
+
+        if (icp.hasConverged()) {
+          Eigen::Matrix4d T_correction =
+              icp.getFinalTransformation().cast<double>();
+          Sophus::SE3d refined_pose =
+              Sophus::SE3d(T_correction) * initial_pose_;
+
+          state_point.rot = refined_pose.unit_quaternion();
+          state_point.pos = refined_pose.translation();
+          kf.change_x(state_point);
+
+          initial_align_finished_ = true;
+          LOG_INFO_F("\033[1;32mFirst Alignment successful! Fitness:
+          %f\033[0m",
+                     icp.getFitnessScore());
+
+          ikdtree = KD_TREE<PointType>();
+        } else {
+          LOG_WARN_F("Initial ICP failed.");
+          return;
+        }
       }
     }
+    // --------------------------------------------
 
     kdtree_size_st = ikdtree.size();
 
@@ -413,6 +465,29 @@ void LaserMappingNode::timer_callback() {
     map_incremental();
     t5 = omp_get_wtime();
 
+    // --- Update Mode: Periodic Alignment Logic ---
+    if (is_update_mode_ && initial_align_finished_) {
+      KeyframeData new_kf;
+      new_kf.timestamp = Measures.lidar_beg_time;
+      new_kf.pose =
+          Sophus::SE3d(state_point.rot.toRotationMatrix(), state_point.pos);
+      new_kf.cloud.reset(new PointCloudXYZI(*feats_undistort));
+      new_keyframes_.push_back(new_kf);
+
+      if (new_keyframes_.size() == 1) {
+        last_kf_pose_ = new_kf.pose;
+        motion_keyframe_count_++;
+      } else {
+        Sophus::SE3d delta = last_kf_pose_.inverse() * new_kf.pose;
+        if (delta.translation().norm() > periodic_align_min_dist_) {
+          motion_keyframe_count_++;
+          last_kf_pose_ = new_kf.pose;
+        }
+      }
+      periodicAlignment();
+    }
+    // ----------------------------------------
+
     if (path_en) publish_path(pubPath_);
     if (scan_pub_en) publish_frame_world(pubLaserCloudFull_);
     if (scan_pub_en && scan_body_pub_en)
@@ -424,74 +499,31 @@ void LaserMappingNode::timer_callback() {
       voxelmap_manager->pubVoxelMap(this->now());
     }
 
-    if (pcd_save_en && pcd_save_interval == -1) {
+    // 建图模式下直接保存 (无复杂逻辑)
+    if (pcd_save_en && pcd_save_interval == -1 && !is_update_mode_) {
       double dist = (state_point.pos - last_pcd_save_pos_).norm();
       if (!is_first_pcd_saved_ || dist > pcd_save_distance_thresh_) {
         last_pcd_save_pos_ = state_point.pos;
         is_first_pcd_saved_ = true;
 
-        if (!is_update_mode_) {
-          std::stringstream ss;
-          ss << std::fixed << std::setprecision(6) << Measures.lidar_beg_time;
-          std::string ts_str = ss.str();
-          std::string pcd_filename =
-              map_data_path_ + "/result/keyframes/" + ts_str + ".pcd";
+        std::stringstream ss;
+        ss << std::fixed << std::setprecision(6) << Measures.lidar_beg_time;
+        std::string ts_str = ss.str();
+        std::string pcd_filename =
+            map_data_path_ + "/result/keyframes/" + ts_str + ".pcd";
 
-          std::filesystem::create_directories(map_data_path_ +
-                                              "/result/keyframes/");
-          pcl::io::savePCDFileBinary(pcd_filename, *feats_undistort);
+        std::filesystem::create_directories(map_data_path_ +
+                                            "/result/keyframes/");
+        pcl::io::savePCDFileBinary(pcd_filename, *feats_undistort);
 
-          fout_pcd_pos << std::fixed << std::setprecision(9)
-                       << Measures.lidar_beg_time << " " << state_point.pos.x()
-                       << " " << state_point.pos.y() << " "
-                       << state_point.pos.z() << " " << geoQuat.x << " "
-                       << geoQuat.y << " " << geoQuat.z << " " << geoQuat.w
-                       << std::endl;
-        }
+        fout_pcd_pos << std::fixed << std::setprecision(9)
+                     << Measures.lidar_beg_time << " " << state_point.pos.x()
+                     << " " << state_point.pos.y() << " " << state_point.pos.z()
+                     << " " << geoQuat.x << " " << geoQuat.y << " " << geoQuat.z
+                     << " " << geoQuat.w << std::endl;
       }
     }
-
-    if (runtime_pos_log) {
-      if (time_log_counter >= MAXN) time_log_counter = 0;
-      frame_num++;
-
-      T1[time_log_counter] = Measures.lidar_beg_time;
-      s_plot[time_log_counter] = t5 - t0;
-      s_plot2[time_log_counter] = feats_undistort->points.size();
-      s_plot3[time_log_counter] = kdtree_incremental_time;
-      s_plot4[time_log_counter] = kdtree_search_time;
-      s_plot5[time_log_counter] = kdtree_delete_counter;
-      s_plot6[time_log_counter] = kdtree_delete_time;
-      s_plot7[time_log_counter] = kdtree_size_st;
-      s_plot8[time_log_counter] = kdtree_size_end;
-      s_plot9[time_log_counter] = aver_time_consu;
-      s_plot10[time_log_counter] = add_point_size;
-      time_log_counter++;
-
-      dump_lio_state_to_log(fp);
-    }
   }
-}
-
-// [修复] 补充 dump_lio_state_to_log 函数实现
-void LaserMappingNode::dump_lio_state_to_log(FILE* fp) {
-  V3D rot_ang(Log(state_point.rot.toRotationMatrix()));
-  fprintf(fp, "%lf ", Measures.lidar_beg_time - first_lidar_time);
-  fprintf(fp, "%lf %lf %lf ", rot_ang(0), rot_ang(1), rot_ang(2));  // Angle
-  fprintf(fp, "%lf %lf %lf ", state_point.pos(0), state_point.pos(1),
-          state_point.pos(2));                 // Pos
-  fprintf(fp, "%lf %lf %lf ", 0.0, 0.0, 0.0);  // omega
-  fprintf(fp, "%lf %lf %lf ", state_point.vel(0), state_point.vel(1),
-          state_point.vel(2));                 // Vel
-  fprintf(fp, "%lf %lf %lf ", 0.0, 0.0, 0.0);  // Acc
-  fprintf(fp, "%lf %lf %lf ", state_point.bg(0), state_point.bg(1),
-          state_point.bg(2));  // Bias_g
-  fprintf(fp, "%lf %lf %lf ", state_point.ba(0), state_point.ba(1),
-          state_point.ba(2));  // Bias_a
-  fprintf(fp, "%lf %lf %lf ", state_point.grav[0], state_point.grav[1],
-          state_point.grav[2]);  // Bias_a
-  fprintf(fp, "\r\n");
-  fflush(fp);
 }
 
 void LaserMappingNode::periodicAlignment() {
@@ -520,32 +552,36 @@ void LaserMappingNode::periodicAlignment() {
   pcl::IterativeClosestPoint<PointType, PointType> icp;
   icp.setInputSource(source_cloud_world);
   icp.setInputTarget(target_cloud);
-  icp.setMaxCorrespondenceDistance(1.0);
-  icp.setMaximumIterations(30);
+  icp.setMaxCorrespondenceDistance(1.5);
+  icp.setMaximumIterations(50);
 
   PointCloudXYZI unused_result;
   icp.align(unused_result);
 
   if (icp.hasConverged() && icp.getFitnessScore() < 0.5) {
-    Eigen::Matrix4f correction = icp.getFinalTransformation();
-    Sophus::SE3d T_correction(correction.block<3, 3>(0, 0).cast<double>(),
-                              correction.block<3, 1>(0, 3).cast<double>());
+    Eigen::Matrix4d correction = icp.getFinalTransformation().cast<double>();
+    Sophus::SE3d T_map_slam(
+        Eigen::Quaterniond(correction.block<3, 3>(0, 0).cast<double>()),
+        correction.block<3, 1>(0, 3).cast<double>());
+
+    for (auto& kf : new_keyframes_) {
+      kf.pose = T_map_slam * kf.pose;
+    }
 
     Sophus::SE3d current_pose(state_point.rot.toRotationMatrix(),
                               state_point.pos);
-    Sophus::SE3d corrected_pose = T_correction * current_pose;
+    Sophus::SE3d corrected_pose = T_map_slam * current_pose;
     state_point.rot = corrected_pose.unit_quaternion();
     state_point.pos = corrected_pose.translation();
 
     kf.change_x(state_point);
 
-    for (auto& kf : new_keyframes_) {
-      kf.pose = T_correction * kf.pose;
-    }
-
     ikdtree = KD_TREE<PointType>();
 
-    LOG_INFO_F("Periodic alignment success. Correction applied and map reset.");
+    LOG_INFO_F(
+        "\033[1;32mPeriodic Alignment successful! Refinement applied.\033[0m");
+  } else {
+    LOG_WARN_F("Periodic Alignment failed to converge.");
   }
 
   new_keyframes_all_.insert(new_keyframes_all_.end(), new_keyframes_.begin(),
@@ -584,40 +620,324 @@ void LaserMappingNode::initialPoseCallback(
 void LaserMappingNode::savePCD() {
   if (!pcd_save_en) return;
 
+  // --- 1. 更新模式：执行智能地图维护 ---
   if (is_update_mode_) {
-    std::vector<KeyframeData> final_kfs = original_map_keyframes_;
-    final_kfs.insert(final_kfs.end(), new_keyframes_all_.begin(),
-                     new_keyframes_all_.end());
+    LOG_INFO_F("Finalizing map update...");
 
-    auto final_cloud = map_updater_->convertKeyframesToPCL(
-        final_kfs, Lidar_R_wrt_IMU, Lidar_T_wrt_IMU);
+    // 将缓冲区中的新关键帧加入总列表
+    new_keyframes_all_.insert(new_keyframes_all_.end(), new_keyframes_.begin(),
+                              new_keyframes_.end());
+    if (new_keyframes_all_.empty()) {
+      LOG_INFO_F("No new frames to save.");
+      return;
+    }
 
-    std::string save_path = map_data_path_ + "/PCD/final_map.pcd";
-    std::filesystem::create_directories(map_data_path_ + "/PCD/");
-    pcl::io::savePCDFileBinary(save_path, *final_cloud);
-    LOG_INFO_F("Saved merged map to %s", save_path.c_str());
+    std::atomic<int> deleted_pcd_count(0);
+    std::atomic<int> updated_pcd_count(0);
+
+    // 1.1 构建新关键帧的 KDTree，用于快速查找受影响的区域
+    pcl::PointCloud<pcl::PointXYZ>::Ptr new_kfs_pose_cloud(
+        new pcl::PointCloud<pcl::PointXYZ>);
+    PointCloudXYZI::Ptr new_points_world(new PointCloudXYZI());
+
+    for (const auto& kf : new_keyframes_all_) {
+      new_kfs_pose_cloud->push_back(pcl::PointXYZ(kf.pose.translation().x(),
+                                                  kf.pose.translation().y(),
+                                                  kf.pose.translation().z()));
+      PointCloudXYZI::Ptr body = kf.getCloud(true);
+      if (body) {
+        PointCloudXYZI world;
+        pcl::transformPointCloud(*body, world, kf.pose.matrix());
+        *new_points_world += world;
+      }
+    }
+
+    pcl::KdTreeFLANN<pcl::PointXYZ> new_kfs_kdtree;
+    new_kfs_kdtree.setInputCloud(new_kfs_pose_cloud);
+
+    pcl::KdTreeFLANN<PointType> new_points_kdtree;
+    if (!new_points_world->empty())
+      new_points_kdtree.setInputCloud(new_points_world);
+
+    // 1.2 筛选出需要检查重叠的旧关键帧
+    std::vector<KeyframeData> kfs_to_check;
+    std::map<double, std::string> final_pose_map;  // 使用 map 保持时间顺序
+    std::mutex map_mtx;                            // 保护 final_pose_map
+
+    for (const auto& old_kf : original_map_keyframes_) {
+      pcl::PointXYZ pt(old_kf.pose.translation().x(),
+                       old_kf.pose.translation().y(),
+                       old_kf.pose.translation().z());
+      std::vector<int> indices;
+      std::vector<float> sqr_dists;
+
+      // 只检查新轨迹半径内的旧帧
+      if (new_kfs_kdtree.radiusSearch(pt, keyframe_search_radius_, indices,
+                                      sqr_dists) > 0) {
+        kfs_to_check.push_back(old_kf);
+      } else {
+        // 距离较远，原样保留
+        std::stringstream ss;
+        auto t = old_kf.pose.translation();
+        auto q = old_kf.pose.unit_quaternion();
+        ss << std::fixed << std::setprecision(9) << old_kf.timestamp << " "
+           << t.x() << " " << t.y() << " " << t.z() << " " << q.x() << " "
+           << q.y() << " " << q.z() << " " << q.w();
+        final_pose_map[old_kf.timestamp] = ss.str();
+      }
+    }
+
+// 1.3 并行处理旧关键帧：移除被新点云覆盖的点
+#pragma omp parallel for
+    for (int i = 0; i < kfs_to_check.size(); ++i) {
+      const auto& old_kf = kfs_to_check[i];
+      PointCloudXYZI::Ptr old_cloud_world(new PointCloudXYZI());
+      PointCloudXYZI::Ptr old_cloud_body = old_kf.getCloud();
+      if (!old_cloud_body || old_cloud_body->empty()) continue;
+
+      pcl::transformPointCloud(*old_cloud_body, *old_cloud_world,
+                               old_kf.pose.matrix());
+
+      pcl::PointIndices::Ptr rm_indices(new pcl::PointIndices);
+      std::vector<int> k_idx(1);
+      std::vector<float> k_sqr_dist(1);
+
+      // 对旧帧中的每个点，检查是否被新点云“覆盖”
+      for (int j = 0; j < old_cloud_world->size(); ++j) {
+        if (new_points_kdtree.nearestKSearch(old_cloud_world->points[j], 1,
+                                             k_idx, k_sqr_dist) > 0) {
+          if (std::sqrt(k_sqr_dist[0]) < point_replacement_radius_) {
+            rm_indices->indices.push_back(j);
+          }
+        }
+      }
+
+      if (!rm_indices->indices.empty()) {
+        // 收集被删除的点用于可视化 (注意线程安全)
+        PointCloudXYZI removed_world;
+        pcl::ExtractIndices<PointType> ext;
+        ext.setInputCloud(old_cloud_world);
+        ext.setIndices(rm_indices);
+        ext.setNegative(false);  // 提取被删除的点
+        ext.filter(removed_world);
+
+#pragma omp critical
+        {
+          for (auto& p : removed_world.points) {
+            PointTypeRGB pr;
+            pr.x = p.x;
+            pr.y = p.y;
+            pr.z = p.z;
+            pr.r = 255;
+            pr.g = 0;
+            pr.b = 0;  // 红色
+            deleted_points_visual_->push_back(pr);
+          }
+        }
+
+        // 保存剩余点到原文件
+        PointCloudXYZI kept_body;
+        ext.setInputCloud(old_cloud_body);
+        ext.setNegative(true);  // 保留未被删除的点
+        ext.filter(kept_body);
+
+        if (kept_body.empty()) {
+          std::remove(old_kf.pcd_path.c_str());
+          deleted_pcd_count++;
+        } else {
+          pcl::io::savePCDFileBinary(old_kf.pcd_path, kept_body);
+          std::stringstream ss;
+          auto t = old_kf.pose.translation();
+          auto q = old_kf.pose.unit_quaternion();
+          ss << std::fixed << std::setprecision(9) << old_kf.timestamp << " "
+             << t.x() << " " << t.y() << " " << t.z() << " " << q.x() << " "
+             << q.y() << " " << q.z() << " " << q.w();
+
+#pragma omp critical
+          {
+            final_pose_map[old_kf.timestamp] = ss.str();
+          }
+          updated_pcd_count++;
+        }
+      } else {
+        // 无重叠，原样保留
+        std::stringstream ss;
+        auto t = old_kf.pose.translation();
+        auto q = old_kf.pose.unit_quaternion();
+        ss << std::fixed << std::setprecision(9) << old_kf.timestamp << " "
+           << t.x() << " " << t.y() << " " << t.z() << " " << q.x() << " "
+           << q.y() << " " << q.z() << " " << q.w();
+
+#pragma omp critical
+        {
+          final_pose_map[old_kf.timestamp] = ss.str();
+        }
+      }
+    }
+
+    // 1.4 保存新关键帧
+    std::string keyframes_path = map_data_path_ + "/result/keyframes/";
+    for (const auto& kf : new_keyframes_all_) {
+      std::stringstream ss;
+      ss << std::fixed << std::setprecision(9) << kf.timestamp;
+      std::string name = ss.str();
+      pcl::io::savePCDFileBinary(keyframes_path + name + ".pcd",
+                                 *kf.getCloud(true));
+
+      std::stringstream ss_pose;
+      auto t = kf.pose.translation();
+      auto q = kf.pose.unit_quaternion();
+      ss_pose << std::fixed << std::setprecision(9) << kf.timestamp << " "
+              << t.x() << " " << t.y() << " " << t.z() << " " << q.x() << " "
+              << q.y() << " " << q.z() << " " << q.w();
+      final_pose_map[kf.timestamp] = ss_pose.str();
+    }
+
+    // 1.5 写入最终的 pose 文件
+    std::ofstream of(map_data_path_ + "/result/localization_output.txt");
+    for (auto const& [ts, line] : final_pose_map) {
+      of << line << std::endl;
+    }
+    of.close();
+
+    LOG_INFO_F(
+        "Map Update Complete. Deleted PCDs: %d, Updated PCDs: %d, Added PCDs: "
+        "%lu",
+        deleted_pcd_count.load(), updated_pcd_count.load(),
+        new_keyframes_all_.size());
+
   } else {
+    // --- 2. 建图模式：简单保存 ---
     std::string raw_points_dir = map_data_path_ + "/PCD/all_raw_points.pcd";
     pcl::PCDWriter pcd_writer;
     pcd_writer.writeBinary(raw_points_dir, *pcl_wait_save);
+    LOG_INFO_F("Saved all raw points to %s", raw_points_dir.c_str());
   }
 }
 
-void LaserMappingNode::map_save_callback(
+void LaserMappingNode::saveMapCallback(
     const std::shared_ptr<std_srvs::srv::Trigger::Request> req,
     std::shared_ptr<std_srvs::srv::Trigger::Response> res) {
   (void)req;
-  LOG_INFO_F("Service /save_map called.");
+  LOG_INFO_F("Service /save_map called. Finalizing map update process...");
+
+  // 步骤 1: 执行核心更新逻辑 (删除重叠、保存新帧)
   savePCD();
+
+  // 步骤 2: 可视化更新结果 (仅在更新模式下)
+  if (is_update_mode_) {
+    // 2.1 发布被删除的点 (红色)
+    if (deleted_points_visual_ && !deleted_points_visual_->empty()) {
+      sensor_msgs::msg::PointCloud2 msg;
+      pcl::toROSMsg(*deleted_points_visual_, msg);
+      msg.header.stamp = this->now();
+      msg.header.frame_id = "camera_init";
+      pub_deleted_points_->publish(msg);
+      LOG_INFO_F("Published deleted points visualization (RED).");
+    }
+
+    // 2.2 发布新增加的地图部分 (绿色)
+    PointCloudXYZRGB::Ptr new_cloud = map_updater_->convertKeyframesToPCL(
+        new_keyframes_all_, Lidar_R_wrt_IMU, Lidar_T_wrt_IMU);
+    for (auto& p : new_cloud->points) {
+      p.r = 0;
+      p.g = 255;
+      p.b = 0;  // 绿色
+    }
+    sensor_msgs::msg::PointCloud2 msg_new;
+    pcl::toROSMsg(*new_cloud, msg_new);
+    msg_new.header.stamp = this->now();
+    msg_new.header.frame_id = "camera_init";
+    pub_newly_added_map_->publish(msg_new);
+    LOG_INFO_F("Published newly added map visualization (GREEN).");
+
+    // 2.3 重新加载并发布最终的完整地图 (白色/原色)
+    // 为了保证绝对一致性，我们从磁盘重新读取 localization_output.txt
+    new_keyframes_all_.clear();
+    new_keyframes_.clear();
+
+    std::string final_pose_file =
+        map_data_path_ + "/result/localization_output.txt";
+    std::string keyframes_dir = map_data_path_ + "/result/keyframes/";
+    std::ifstream infile(final_pose_file);
+    std::map<double, KeyframeData> final_kfs_map;
+    std::string line;
+
+    if (infile.is_open()) {
+      while (std::getline(infile, line)) {
+        std::stringstream ss(line);
+        KeyframeData kf;
+        Eigen::Quaterniond q;
+        Eigen::Vector3d t;
+        ss >> kf.timestamp >> t.x() >> t.y() >> t.z() >> q.x() >> q.y() >>
+            q.z() >> q.w();
+        kf.pose = Sophus::SE3d(q, t);
+
+        std::stringstream pcd_filename_ss;
+        pcd_filename_ss << std::fixed << std::setprecision(9) << kf.timestamp
+                        << ".pcd";
+        kf.pcd_path = keyframes_dir + pcd_filename_ss.str();
+        if (std::filesystem::exists(kf.pcd_path))
+          final_kfs_map[kf.timestamp] = kf;
+      }
+      infile.close();
+    } else {
+      LOG_ERROR_F("Failed to reload final pose file for visualization.");
+    }
+
+    // 分离 "保留的旧帧" 和 "新帧" 以便于分别可视化 (可选)
+    std::vector<KeyframeData> final_kept_kfs;
+    std::unordered_set<double> original_timestamps;
+    for (const auto& okf : original_map_keyframes_)
+      original_timestamps.insert(okf.timestamp);
+
+    for (const auto& pair : final_kfs_map) {
+      if (original_timestamps.count(pair.first))
+        final_kept_kfs.push_back(pair.second);
+    }
+
+    // 发布保留的旧地图 (白色/Intensity)
+    if (!final_kept_kfs.empty()) {
+      PointCloudXYZRGB::Ptr kept_cloud = map_updater_->convertKeyframesToPCL(
+          final_kept_kfs, Lidar_R_wrt_IMU, Lidar_T_wrt_IMU);
+      sensor_msgs::msg::PointCloud2 kept_msg;
+      pcl::toROSMsg(*kept_cloud, kept_msg);
+      kept_msg.header.stamp = this->now();
+      kept_msg.header.frame_id = "camera_init";
+      pub_original_map_kept_->publish(kept_msg);
+      LOG_INFO_F("Published preserved original map (WHITE).");
+    }
+
+    // 2.4 保存并发布合并后的最终可视化大 PCD
+    std::vector<KeyframeData> all_final_kfs;
+    for (const auto& pair : final_kfs_map) all_final_kfs.push_back(pair.second);
+
+    if (!all_final_kfs.empty()) {
+      PointCloudXYZRGB::Ptr final_map_cloud =
+          map_updater_->convertKeyframesToPCL(all_final_kfs, Lidar_R_wrt_IMU,
+                                              Lidar_T_wrt_IMU);
+
+      std::string final_viz_path =
+          map_data_path_ + "/map_final_visualization.pcd";
+      pcl::io::savePCDFileBinary(final_viz_path, *final_map_cloud);
+      LOG_INFO_F("Saved merged visualization map to %s",
+                 final_viz_path.c_str());
+
+      sensor_msgs::msg::PointCloud2 final_msg;
+      pcl::toROSMsg(*final_map_cloud, final_msg);
+      final_msg.header.stamp = this->now();
+      final_msg.header.frame_id = "camera_init";
+      pub_final_updated_map_->publish(final_msg);
+    }
+  }
+
   res->success = true;
-  res->message = "Map saved.";
+  res->message = "Map update complete.";
 }
 
 void LaserMappingNode::map_publish_callback() {
   if (map_pub_en) publish_map(pubLaserCloudMap_);
 }
-
-// ------------------ 下面是原有的辅助函数实现，保持不变 ------------------
 
 void LaserMappingNode::pointBodyToWorld(PointType const* const pi,
                                         PointType* const po) {

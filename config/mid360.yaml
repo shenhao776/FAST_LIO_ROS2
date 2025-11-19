@@ -6,8 +6,6 @@
         filter_size_surf: 0.1
         filter_size_map: 0.1
         cube_side_length: 1000.0
-        runtime_pos_log_enable: false
-        map_file_path: "/root/shared_files/dataset/my_map_data/PCD/test.pcd"
 
         common:
             lid_topic:  "/livox/lidar"
