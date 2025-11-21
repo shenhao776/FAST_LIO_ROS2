@@ -407,8 +407,7 @@ void LaserMappingNode::timer_callback() {
           kf.change_x(state_point);
 
           initial_align_finished_ = true;
-          LOG_INFO_F("\033[1;32mFirst Alignment successful! Fitness:
-          %f\033[0m",
+          LOG_INFO_F("\033[1;32mFirst Alignment successful! Fitness:%f\033[0m",
                      icp.getFitnessScore());
 
           ikdtree = KD_TREE<PointType>();
