@@ -13,7 +13,7 @@ from launch_ros.actions import Node
 def generate_launch_description():
     package_path = get_package_share_directory("fast_lio")
     default_config_path = os.path.join(package_path, "config")
-    default_rviz_config_path = os.path.join(package_path, "rviz", "fastlio.rviz")
+    default_rviz_config_path = os.path.join(package_path, "rviz", "map_updater.rviz")
 
     use_sim_time = LaunchConfiguration("use_sim_time")
     config_path = LaunchConfiguration("config_path")

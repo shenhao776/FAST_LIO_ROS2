@@ -18,7 +18,7 @@ def generate_launch_description():
         package_path, "config", "camera_pinhole_mid360.yaml"
     )
     rviz_config_file = os.path.join(
-        package_path, "rviz", "fastlio.rviz"
+        package_path, "rviz", "map_updater.rviz"
     )  # 使用现有的或新建一个
 
     # 声明启动参数

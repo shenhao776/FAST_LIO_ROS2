@@ -28,11 +28,17 @@
 #include <nav_msgs/msg/odometry.hpp>
 #include <nav_msgs/msg/path.hpp>
 #include <rclcpp/rclcpp.hpp>
+#include <sensor_msgs/msg/image.hpp>  // [新增] 图像消息
 #include <sensor_msgs/msg/imu.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <std_srvs/srv/trigger.hpp>
 #include <visualization_msgs/msg/marker.hpp>
 #include <visualization_msgs/msg/marker_array.hpp>
+
+// OpenCV & Bridge [新增]
+#include <cv_bridge/cv_bridge.h>
+
+#include <opencv2/opencv.hpp>
 
 // PCL
 #include <pcl/filters/voxel_grid.h>
@@ -73,11 +79,11 @@ class LaserMappingNode : public rclcpp::Node {
   static void OnSignal(int sig);
 
  private:
-  // --- 初始化函数 (此前缺失声明) ---
+  // --- 初始化函数 ---
   void readParameters();
   void initializeSubscribersAndPublishers();
   void initializeFiles();
-  void initializeComponents();  // 如果cpp中有用到
+  void initializeComponents();
 
   // --- 核心流程 ---
   void timer_callback();
@@ -86,11 +92,13 @@ class LaserMappingNode : public rclcpp::Node {
   void standard_pcl_cbk(const sensor_msgs::msg::PointCloud2::UniquePtr msg);
   void livox_pcl_cbk(const livox_ros_driver2::msg::CustomMsg::UniquePtr msg);
   void imu_cbk(const sensor_msgs::msg::Imu::UniquePtr msg_in);
+  void img_cbk(
+      const sensor_msgs::msg::Image::UniquePtr msg);  // [新增] 图像回调
 
   void initialPoseCallback(
       const geometry_msgs::msg::PoseWithCovarianceStamped::SharedPtr msg);
 
-  // [修复] 补充声明服务回调和发布回调
+  // 服务回调和发布回调
   void saveMapCallback(
       const std::shared_ptr<std_srvs::srv::Trigger::Request> req,
       std::shared_ptr<std_srvs::srv::Trigger::Response> res);
@@ -100,7 +108,7 @@ class LaserMappingNode : public rclcpp::Node {
   bool sync_packages(MeasureGroup& meas);
   void lasermap_fov_segment();
   void map_incremental();
-  void points_cache_collect();  // [修复] 补充声明
+  void points_cache_collect();
 
   // --- 坐标变换 ---
   template <typename T>
@@ -129,7 +137,6 @@ class LaserMappingNode : public rclcpp::Node {
   void periodicAlignment();
   void savePCD();
 
-  // [修复] 确保此函数在 cpp 中被实现
   void dump_lio_state_to_log(FILE* fp);
 
   template <typename T>
@@ -176,6 +183,9 @@ class LaserMappingNode : public rclcpp::Node {
       sub_pcl_livox_;
   rclcpp::Subscription<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr
       sub_initial_pose_;
+  rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr
+      sub_img_;  // [新增] 图像订阅
+  double last_timestamp_img = -1.0;
 
   std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
   rclcpp::TimerBase::SharedPtr timer_;
@@ -216,6 +226,10 @@ class LaserMappingNode : public rclcpp::Node {
   std::deque<double> time_buffer;
   std::deque<PointCloudXYZI::Ptr> lidar_buffer;
   std::deque<sensor_msgs::msg::Imu::ConstSharedPtr> imu_buffer;
+  // [新增] 图像缓冲
+  std::deque<cv::Mat> img_buffer;
+  std::deque<double> img_time_buffer;
+
   std::mutex mtx_buffer;
   std::condition_variable sig_buffer;
   std::mutex mtx_initial_pose;
@@ -223,11 +237,14 @@ class LaserMappingNode : public rclcpp::Node {
   pcl::VoxelGrid<PointType> downSizeFilterSurf;
   pcl::VoxelGrid<PointType> downSizeFilterMap;
 
-  std::string map_file_path, lid_topic, imu_topic;
+  std::string map_file_path, lid_topic, imu_topic, img_topic;
   bool pcd_save_en = false, time_sync_en = false, extrinsic_est_en = true,
        path_en = true;
   bool scan_pub_en = false, dense_pub_en = false, scan_body_pub_en = false;
   bool effect_pub_en = false, map_pub_en = false;
+  // img_en 虽被逻辑移除，但参数读取可能还会用到，暂且保留或忽略
+  bool img_en = false;
+
   double gyr_cov = 0.1, acc_cov = 0.1, b_gyr_cov = 0.0001, b_acc_cov = 0.0001;
   double filter_size_corner_min = 0, filter_size_surf_min = 0,
          filter_size_map_min = 0, fov_deg = 0;
@@ -269,8 +286,10 @@ class LaserMappingNode : public rclcpp::Node {
   double last_timestamp_lidar = 0, last_timestamp_imu = -1.0;
   double epsi[23] = {0.001};
 
-  float res_last[100000] = {0.0};
-  bool point_selected_surf[100000] = {0};
+  // [关键修改] 改为 vector 以支持动态扩容
+  std::vector<float> res_last;
+  std::vector<bool> point_selected_surf;
+
   double T1[MAXN], s_plot[MAXN], s_plot2[MAXN], s_plot3[MAXN], s_plot4[MAXN],
       s_plot5[MAXN], s_plot6[MAXN], s_plot7[MAXN], s_plot8[MAXN], s_plot9[MAXN],
       s_plot10[MAXN], s_plot11[MAXN];
