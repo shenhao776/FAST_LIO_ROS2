@@ -1666,16 +1666,12 @@ void LaserMappingNode::publish_path(
   msg_body_pose.header.stamp = get_ros_time(lidar_end_time);
   msg_body_pose.header.frame_id = "camera_init";
 
-  static int jjj = 0;
-  jjj++;
-  if (jjj % 10 == 0) {
-    path.poses.push_back(msg_body_pose);
+  path.poses.push_back(msg_body_pose);
 
-    path.header.frame_id = "camera_init";
-    path.header.stamp = msg_body_pose.header.stamp;
+  path.header.frame_id = "camera_init";
+  path.header.stamp = msg_body_pose.header.stamp;
 
-    pubPath->publish(path);
-  }
+  pubPath->publish(path);
 }
 
 void LaserMappingNode::h_share_model(
