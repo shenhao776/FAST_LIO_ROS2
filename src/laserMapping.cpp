@@ -325,7 +325,7 @@ void LaserMappingNode::timer_callback() {
       return;
     }
 
-    double t0, t1, t2, t3;
+    double t0, t1, t2, t3, t4;  // [移植] 增加 t4 变量
     match_time = 0;
     kdtree_search_time = 0.0;
     solve_time = 0;
@@ -384,12 +384,10 @@ void LaserMappingNode::timer_callback() {
     double solve_H_time = 0;
 
     // ==============================================================================
-    // 核心逻辑分支 (Aligning with LIVMapper::handleLIO)
+    // 核心逻辑分支
     // ==============================================================================
     if (!is_update_mode_) {
       // --- A. 建图模式 (Mapping Mode) ---
-      // 逻辑: EKF -> 发布里程计 -> 地图增量更新
-
       kf.update_iterated_dyn_share_modified(LASER_POINT_COV, solve_H_time);
 
       state_point = kf.get_x();
@@ -406,9 +404,6 @@ void LaserMappingNode::timer_callback() {
       map_incremental();
     } else {
       // --- B. 更新/定位模式 (Update Mode) ---
-      // 逻辑: 初始配准 -> EKF -> 关键帧收集 -> 周期性配准 -> 发布里程计 ->
-      // 地图增量更新
-
       // B.1 初始配准
       if (!initial_align_finished_) {
         if (!initial_pose_received_) {
@@ -472,7 +467,6 @@ void LaserMappingNode::timer_callback() {
         geoQuat.z = state_point.rot.coeffs()[2];
         geoQuat.w = state_point.rot.coeffs()[3];
 
-        // 关键帧收集
         KeyframeData new_kf;
         new_kf.timestamp = Measures.lidar_beg_time;
         new_kf.pose =
@@ -493,7 +487,6 @@ void LaserMappingNode::timer_callback() {
 
         periodicAlignment();
 
-        // 重新同步状态（如果对齐发生了修正）
         euler_cur = SO3ToEuler(state_point.rot);
         pos_lid = state_point.pos + state_point.rot * state_point.offset_T_L_I;
         geoQuat.x = state_point.rot.coeffs()[0];
@@ -512,7 +505,11 @@ void LaserMappingNode::timer_callback() {
     // 数据保存模块 (Pose, PCD, Images)
     // ==============================================================================
 
-    // 1. 实时位姿保存 (对应 LIVMapper::handleLIO 中的 pose output)
+    // [修复]：定义局部变量用于在锁外保存图像
+    cv::Mat image_to_save;
+    std::string img_filename_to_save;
+    bool need_save_img = false;
+
     if (pcd_save_en && flg_EKF_inited) {
       std::string pose_file_path =
           is_update_mode_ ? map_data_path_ + "/localization_output_updated.txt"
@@ -537,8 +534,6 @@ void LaserMappingNode::timer_callback() {
         evoFile.close();
       }
 
-      // 2. 关键帧 PCD 保存 (仅在 Mapping 模式下自动保存，Update
-      // 模式下在最后统一保存)
       if (!is_update_mode_) {
         double dist = (state_point.pos - last_pcd_save_pos_).norm();
         if (!is_first_pcd_saved_ || dist > pcd_save_distance_thresh_) {
@@ -558,15 +553,13 @@ void LaserMappingNode::timer_callback() {
         }
       }
 
-      // 3. 图像保存 (【新增】从 LIVMapper 移植)
-      // 注意：这需要类中存在 img_buffer 和 img_time_buffer 成员变量
-      mtx_buffer.lock();  // 假设使用同一个 buffer 锁
+      // [修复]：图像匹配逻辑 (加锁)，但不在此进行 I/O 操作
+      mtx_buffer.lock();
       if (!img_buffer.empty()) {
         double current_lidar_time = Measures.lidar_beg_time;
         double min_time_diff = 1000.0;
         int best_match_idx = -1;
 
-        // 寻找时间戳最接近的图像
         for (size_t i = 0; i < img_time_buffer.size(); ++i) {
           double time_diff = std::abs(img_time_buffer[i] - current_lidar_time);
           if (time_diff < min_time_diff) {
@@ -575,30 +568,35 @@ void LaserMappingNode::timer_callback() {
           }
         }
 
-        // 如果匹配误差小于 50ms，则保存
         if (best_match_idx != -1 && min_time_diff < 0.05) {
-          cv::Mat image_to_save = img_buffer[best_match_idx];
-          if (!image_to_save.empty()) {
+          if (!img_buffer[best_match_idx].empty()) {
+            // [关键修复] 仅克隆图像数据，不进行磁盘 I/O
+            image_to_save = img_buffer[best_match_idx].clone();
+
             std::stringstream ss;
             ss << std::fixed << std::setprecision(9) << current_lidar_time;
             std::string img_dir = map_data_path_ + "/result/images/";
-            std::string img_filename = img_dir + ss.str() + ".png";
+            img_filename_to_save = img_dir + ss.str() + ".png";
 
+            // 目录检查建议在初始化时完成，这里为了安全也可以保留，但在锁内检查文件系统有微小开销
             if (!std::filesystem::exists(img_dir)) {
               std::filesystem::create_directories(img_dir);
             }
-
-            cv::imwrite(img_filename, image_to_save);
-            // LOG_INFO_F("Saved image for frame %s", ss.str().c_str());
+            need_save_img = true;
           }
-          // 清理旧缓存
+          // 清理缓冲区
           img_buffer.erase(img_buffer.begin(),
                            img_buffer.begin() + best_match_idx + 1);
           img_time_buffer.erase(img_time_buffer.begin(),
                                 img_time_buffer.begin() + best_match_idx + 1);
         }
       }
-      mtx_buffer.unlock();
+      mtx_buffer.unlock();  // [关键] 尽快释放锁
+    }
+
+    // [修复]：在锁外执行耗时的图像保存
+    if (need_save_img && !image_to_save.empty()) {
+      cv::imwrite(img_filename_to_save, image_to_save);
     }
 
     // 6. 发布话题
@@ -612,6 +610,59 @@ void LaserMappingNode::timer_callback() {
         voxelmap_manager->config_setting_.is_pub_plane_map_) {
       voxelmap_manager->pubVoxelMap(this->now());
     }
+
+    // ==============================================================================
+    // [移植] 工程2的输出部分 (Output Part)
+    // ==============================================================================
+    t4 = omp_get_wtime();
+    frame_num++;
+    aver_time_consu =
+        aver_time_consu * (frame_num - 1) / frame_num + (t4 - t0) / frame_num;
+
+    LOG_INFO_F(
+        "\033[1;34m+-----------------------------------------------------------"
+        "-+\033[0m");
+    LOG_INFO_F(
+        "\033[1;34m|                         LIO Mapping Time                  "
+        " |\033[0m");
+    LOG_INFO_F(
+        "\033[1;34m+-----------------------------------------------------------"
+        "-+\033[0m");
+    LOG_INFO_F("\033[1;34m| %-29s | %-27s |\033[0m", "Algorithm Stage",
+               "Time (secs)");
+    LOG_INFO_F(
+        "\033[1;34m+-----------------------------------------------------------"
+        "-+\033[0m");
+    LOG_INFO_F("\033[1;36m| %-29s | %-27f |\033[0m", "DownSample", t1 - t0);
+    LOG_INFO_F("\033[1;36m| %-29s | %-27f |\033[0m", "State Estimation",
+               t2 - t1);  // 注意：工程1这里是 t2-t1 为配准前准备，t3-t2 为EKF
+    // 根据工程1的变量：
+    // t0: 开始
+    // t1: 降采样结束
+    // t2: KDTree 构建完成/准备开始 EKF
+    // t3: EKF 结束 / 建图开始
+    // t4: 结束
+    // 对应关系调整：
+    LOG_INFO_F("\033[1;36m| %-29s | %-27f |\033[0m", "Preprocess & Tree",
+               t2 - t0);
+    LOG_INFO_F("\033[1;36m| %-29s | %-27f |\033[0m", "State Estimation",
+               t3 - t2);
+    LOG_INFO_F("\033[1;36m| %-29s | %-27f |\033[0m", "Map Incremental",
+               t4 - t3);
+    LOG_INFO_F(
+        "\033[1;34m+-----------------------------------------------------------"
+        "-+\033[0m");
+    LOG_INFO_F("\033[1;36m| %-29s | %-27f |\033[0m", "Current Total Time",
+               t4 - t0);
+    LOG_INFO_F("\033[1;36m| %-29s | %-27f |\033[0m", "Average Total Time",
+               aver_time_consu);
+    LOG_INFO_F(
+        "\033[1;34m+-----------------------------------------------------------"
+        "-+\033[0m");
+
+    // [关键] 强制刷新 stdout 缓冲区，防止 printf/LOG
+    // 内容滞留在缓冲区造成“卡顿”假象
+    fflush(stdout);
   }
 }
 
@@ -1440,7 +1491,6 @@ void LaserMappingNode::img_cbk(const sensor_msgs::msg::Image::UniquePtr msg) {
   }
   mtx_buffer.unlock();
 
-  // 通知主线程 (虽然 timer_callback 是定时触发，但保持逻辑一致性)
   sig_buffer.notify_all();
 }
 
