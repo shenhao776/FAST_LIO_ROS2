@@ -136,14 +136,14 @@ Visualization Manager:
       Min Intensity: 0
       Name: Map (Kept)
       Position Transformer: XYZ
-      Selectable: true
-      Size (Pixels): 2
+      Selectable: false
+      Size (Pixels): 1
       Size (m): 0.009999999776482582
       Style: Points
       Topic:
-        Depth: 5
+        Depth: 1
         Durability Policy: Transient Local
-        Filter size: 10
+        Filter size: 1
         History Policy: Keep Last
         Reliability Policy: Reliable
         Value: /map/original_map_kept
@@ -171,7 +171,7 @@ Visualization Manager:
       Name: Map (New)
       Position Transformer: XYZ
       Selectable: true
-      Size (Pixels): 3
+      Size (Pixels): 1
       Size (m): 0.019999999552965164
       Style: Points
       Topic:
@@ -205,7 +205,7 @@ Visualization Manager:
       Name: Map (Deleted)
       Position Transformer: XYZ
       Selectable: true
-      Size (Pixels): 4
+      Size (Pixels): 1
       Size (m): 0.029999999329447746
       Style: Points
       Topic:
@@ -285,18 +285,6 @@ Visualization Manager:
         Reliability Policy: Reliable
         Value: /path
       Value: true
-    - Class: rviz_default_plugins/MarkerArray
-      Enabled: false
-      Name: Voxel Planes
-      Namespaces:
-        {}
-      Topic:
-        Depth: 5
-        Durability Policy: Volatile
-        History Policy: Keep Last
-        Reliability Policy: Reliable
-        Value: visualization_marker_array
-      Value: false
     - Class: rviz_default_plugins/Image
       Enabled: true
       Max Value: 1
@@ -357,25 +345,25 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz_default_plugins/Orbit
-      Distance: 18.931291580200195
+      Distance: 20.012113571166992
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.05999999865889549
         Stereo Focal Distance: 1
         Swap Stereo Eyes: false
         Value: false
       Focal Point:
-        X: -1.3657275438308716
-        Y: 0.17286711931228638
-        Z: -1.7251087427139282
+        X: -5.380186080932617
+        Y: -1.9457151889801025
+        Z: -2.69911527633667
       Focal Shape Fixed Size: true
       Focal Shape Size: 0.05000000074505806
       Invert Z Axis: false
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Pitch: 1.5697963237762451
+      Pitch: 1.5647963285446167
       Target Frame: <Fixed Frame>
       Value: Orbit (rviz)
-      Yaw: 4.599987030029297
+      Yaw: 4.819971561431885
     Saved: ~
 Window Geometry:
   Displays:
@@ -385,13 +373,13 @@ Window Geometry:
   Hide Right Dock: true
   Image:
     collapsed: false
-  QMainWindow State: 000000ff00000000fd0000000200000000000002530000075efc0200000004fb000000100044006900730070006c00610079007301000000690000053a0000017800fffffffb0000001200530065006c0065006300740069006f006e000000032700000139000000ab00fffffffb0000001e0054006f006f006c002000500072006f007000650072007400690065007300000003b90000017b000000ab00fffffffb0000000a0049006d00610067006501000005af000002180000004500ffffff00000001000002d80000075efc0200000001fb0000000a0056006900650077007300000000690000075e0000012300ffffff000005210000075e00000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
+  QMainWindow State: 000000ff00000000fd00000002000000000000030e0000075efc0200000004fb000000100044006900730070006c00610079007301000000690000053a0000017800fffffffb0000001200530065006c0065006300740069006f006e000000032700000139000000ab00fffffffb0000001e0054006f006f006c002000500072006f007000650072007400690065007300000003b90000017b000000ab00fffffffb0000000a0049006d00610067006501000005af000002180000004500ffffff00000001000002d80000075efc0200000001fb0000000a0056006900650077007300000000690000075e0000012300ffffff00000be60000075e00000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
   Selection:
     collapsed: false
   Tool Properties:
     collapsed: false
   Views:
     collapsed: true
-  Width: 1920
-  X: 1920
+  Width: 3840
+  X: 0
   Y: 54

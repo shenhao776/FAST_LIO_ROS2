@@ -772,24 +772,24 @@ void LaserMappingNode::savePCD() {
         std::filesystem::create_directories(pcd_dir);
       }
 
-      std::string all_points_dir = pcd_dir + "map_final_filtered.pcd";
+      std::string all_points_dir = pcd_dir + "map_final_raw.pcd";
       pcl::PCDWriter pcd_writer;
 
       // 降采样并保存
-      pcl::PointCloud<PointType>::Ptr downsampled_cloud(
-          new pcl::PointCloud<PointType>);
-      pcl::VoxelGrid<PointType> voxel_filter;
-      voxel_filter.setInputCloud(pcl_wait_save);
-      voxel_filter.setLeafSize(filter_size_pcd, filter_size_pcd,
-                               filter_size_pcd);
-      voxel_filter.filter(*downsampled_cloud);
+      // pcl::PointCloud<PointType>::Ptr downsampled_cloud(
+      //     new pcl::PointCloud<PointType>);
+      // pcl::VoxelGrid<PointType> voxel_filter;
+      // voxel_filter.setInputCloud(pcl_wait_save);
+      // voxel_filter.setLeafSize(filter_size_pcd, filter_size_pcd,
+      //                          filter_size_pcd);
+      // voxel_filter.filter(*downsampled_cloud);
 
-      pcd_writer.writeBinary(all_points_dir, *downsampled_cloud);
+      pcd_writer.writeBinary(all_points_dir, *pcl_wait_save);
 
       LOG_INFO_F(
-          "\033[1;32m[Map Save] Final downsampled intensity map saved to: %s "
+          "\033[1;32m[Map Save] Final intensity map saved to: %s "
           "with %lu points.\033[0m",
-          all_points_dir.c_str(), downsampled_cloud->points.size());
+          all_points_dir.c_str(), pcl_wait_save->points.size());
     }
   }
   // ==========================================================================================
