@@ -438,7 +438,22 @@ void LaserMappingNode::timer_callback() {
 
         if (icp.hasConverged()) {
           Eigen::Matrix4d T_final = icp.getFinalTransformation().cast<double>();
-          Sophus::SE3d aligned_pose(T_final);
+
+          // 1. 检查 NaN，防止非法数据传入
+          if (T_final.array().isNaN().any()) {
+            LOG_ERROR_F("ICP result contains NaN! Skipping initial alignment.");
+            return;
+          }
+
+          // 2. 使用四元数构造 SE3，以解决旋转矩阵正交性误差导致的 Sophus 崩溃
+          Eigen::Matrix3d R_final = T_final.block<3, 3>(0, 0);
+          Eigen::Vector3d t_final = T_final.block<3, 1>(0, 3);
+
+          // 通过四元数归一化，强制修正旋转矩阵的微小数值误差
+          Eigen::Quaterniond q_final(R_final);
+          q_final.normalize();
+
+          Sophus::SE3d aligned_pose(q_final, t_final);
           Sophus::SE3d T_imu_lidar(Lidar_R_wrt_IMU, Lidar_T_wrt_IMU);
           Sophus::SE3d T_world_imu = aligned_pose * T_imu_lidar.inverse();
 
@@ -447,8 +462,11 @@ void LaserMappingNode::timer_callback() {
           kf.change_x(state_point);
 
           initial_align_finished_ = true;
-          LOG_INFO_F("\033[1;32mInitial Alignment Success! Fitness:%f\033[0m",
-                     icp.getFitnessScore());
+          LOG_INFO_F(
+              "\033[1;32mInitial Alignment Success! state_point = [%f, %f, "
+              "%f], Fitness:%f\033[0m",
+              state_point.pos.x(), state_point.pos.y(), state_point.pos.z(),
+              icp.getFitnessScore());
         } else {
           LOG_WARN_F("Initial ICP failed.");
           return;
@@ -484,9 +502,9 @@ void LaserMappingNode::timer_callback() {
             last_kf_pose_ = new_kf.pose;
           }
         }
-
+        LOG_WARN_F("Alignment1...");
         periodicAlignment();
-
+        LOG_WARN_F("Alignment1...");
         euler_cur = SO3ToEuler(state_point.rot);
         pos_lid = state_point.pos + state_point.rot * state_point.offset_T_L_I;
         geoQuat.x = state_point.rot.coeffs()[0];
@@ -667,67 +685,160 @@ void LaserMappingNode::timer_callback() {
 }
 
 void LaserMappingNode::periodicAlignment() {
+  LOG_INFO_F("Starting Periodic Alignment...");
+  // 0. 基本检查
   if (!is_update_mode_ || motion_keyframe_count_ < periodic_align_interval_) {
     return;
   }
 
+  // 1. 聚合源点云 (Source: Current SLAM World)
   PointCloudXYZI::Ptr source_cloud_world(new PointCloudXYZI());
   for (const auto& kf_new : new_keyframes_) {
     PointCloudXYZI::Ptr kf_cloud = kf_new.getCloud();
     if (kf_cloud->empty()) continue;
     PointCloudXYZI::Ptr transformed_cloud(new PointCloudXYZI());
-    Eigen::Matrix4d T = kf_new.pose.matrix();
-    pcl::transformPointCloud(*kf_cloud, *transformed_cloud, T);
+    // [Project 2 Logic] 转换到世界系
+    pcl::transformPointCloud(*kf_cloud, *transformed_cloud,
+                             kf_new.pose.matrix().cast<float>());
     *source_cloud_world += *transformed_cloud;
   }
 
-  if (source_cloud_world->empty()) return;
+  if (source_cloud_world->empty()) {
+    LOG_WARN_F("Periodic Alignment: Source cloud empty. Clearing buffer.");
+    // 清理缓冲区防止堆积
+    new_keyframes_all_.insert(new_keyframes_all_.end(), new_keyframes_.begin(),
+                              new_keyframes_.end());
+    new_keyframes_.clear();
+    motion_keyframe_count_ = 0;
+    return;
+  }
 
+  // 2. 获取目标点云 (Target: Global Map)
   PointCloudXYZI::Ptr target_cloud = map_updater_->findTargetPointsForICP(
       new_keyframes_, voxel_map_index, original_map_keyframes_,
       periodic_align_min_dist_);
 
-  if (target_cloud->empty()) return;
+  if (target_cloud->points.size() < 100) {
+    LOG_WARN_F(
+        "Periodic Alignment: Target map too small (%zu points). Skipping.",
+        target_cloud->points.size());
+    return;
+  }
 
+  // 3. [关键一致性] 体素降采样 (Voxel Grid Filter 0.5m)
+  // 这步能显著减少点数，防止 ICP 计算过载导致的崩溃
+  pcl::VoxelGrid<PointType> voxel_filter;
+  voxel_filter.setLeafSize(0.5f, 0.5f, 0.5f);
+
+  PointCloudXYZI::Ptr source_cloud_filtered(new PointCloudXYZI());
+  voxel_filter.setInputCloud(source_cloud_world);
+  voxel_filter.filter(*source_cloud_filtered);
+
+  PointCloudXYZI::Ptr target_cloud_filtered(new PointCloudXYZI());
+  voxel_filter.setInputCloud(target_cloud);
+  voxel_filter.filter(*target_cloud_filtered);
+
+  if (source_cloud_filtered->empty() || target_cloud_filtered->empty()) {
+    LOG_WARN_F("Periodic Alignment: Clouds empty after filtering.");
+    return;
+  }
+
+  // 4. [关键一致性] 计算初始猜测 (Initial Guess using NDT/PCL Pose)
+  Eigen::Matrix4f initial_guess_matrix = Eigen::Matrix4f::Identity();
+  bool use_initial_guess = false;
+
+  if (initial_pose_received_ && !new_keyframes_.empty()) {
+    Sophus::SE3d T_world_ndt;
+    {
+      std::lock_guard<std::mutex> lock(mtx_initial_pose);
+      T_world_ndt = initial_pose_;
+    }
+    // T_guess = T_map_slam = T_world_ndt * T_world_slam_inverse
+    Sophus::SE3d T_world_slam = new_keyframes_.back().pose;
+    Sophus::SE3d T_guess = T_world_ndt * T_world_slam.inverse();
+
+    initial_guess_matrix = T_guess.matrix().cast<float>();
+    use_initial_guess = true;
+    LOG_INFO_F("Using external pose as initial guess.");
+  }
+
+  // 5. 执行 ICP
   pcl::IterativeClosestPoint<PointType, PointType> icp;
-  icp.setInputSource(source_cloud_world);
-  icp.setInputTarget(target_cloud);
-  icp.setMaxCorrespondenceDistance(1.5);
+  icp.setInputSource(source_cloud_filtered);
+  icp.setInputTarget(target_cloud_filtered);
+  icp.setMaxCorrespondenceDistance(2.0);  // 稍微放宽范围
   icp.setMaximumIterations(50);
+  icp.setTransformationEpsilon(1e-6);
+  icp.setEuclideanFitnessEpsilon(1e-6);
 
   PointCloudXYZI unused_result;
-  icp.align(unused_result);
+  try {
+    icp.align(unused_result, initial_guess_matrix);
+  } catch (...) {
+    LOG_ERROR_F("ICP alignment threw an exception! Skipping.");
+    return;
+  }
 
-  if (icp.hasConverged() && icp.getFitnessScore() < 0.5) {
-    Eigen::Matrix4d correction = icp.getFinalTransformation().cast<double>();
-    Sophus::SE3d T_map_slam(
-        Eigen::Quaterniond(correction.block<3, 3>(0, 0).cast<double>()),
-        correction.block<3, 1>(0, 3).cast<double>());
+  bool converged = icp.hasConverged();
+  double score = icp.getFitnessScore();
 
+  // 6. 对齐后处理
+  if (converged && score < 0.6) {  // 阈值参考工程2
+    Eigen::Matrix4d T_final_mat = icp.getFinalTransformation().cast<double>();
+
+    // [防崩溃] 检查 NaN
+    if (T_final_mat.array().isNaN().any()) {
+      LOG_ERROR_F("ICP result contains NaN!");
+      return;
+    }
+
+    // [防崩溃] 使用四元数归一化构造 SE3
+    Eigen::Matrix3d R_final = T_final_mat.block<3, 3>(0, 0);
+    Eigen::Vector3d t_final = T_final_mat.block<3, 1>(0, 3);
+    Eigen::Quaterniond q_final(R_final);
+    q_final.normalize();  // 必须归一化！
+
+    Sophus::SE3d T_map_slam(q_final, t_final);
+
+    LOG_INFO_F("\033[1;32mPeriodic Alignment Success! Score: %.4f\033[0m",
+               score);
+
+    // 7. [关键一致性] 应用校正到当前批次关键帧
     for (auto& kf : new_keyframes_) {
       kf.pose = T_map_slam * kf.pose;
     }
 
-    Sophus::SE3d current_pose(state_point.rot.toRotationMatrix(),
-                              state_point.pos);
-    Sophus::SE3d corrected_pose = T_map_slam * current_pose;
-    state_point.rot = corrected_pose.unit_quaternion();
-    state_point.pos = corrected_pose.translation();
+    // 8. [关键一致性] 更新当前系统状态 (EKF State)
+    Sophus::SE3d current_pose_slam(state_point.rot.toRotationMatrix(),
+                                   state_point.pos);
+    Sophus::SE3d corrected_pose_map = T_map_slam * current_pose_slam;
 
+    state_point.rot = corrected_pose_map.unit_quaternion();
+    state_point.pos = corrected_pose_map.translation();
+
+    // 更新滤波器状态
     kf.change_x(state_point);
 
-    ikdtree = KD_TREE<PointType>();
-
+    // 9. [关键一致性] 重置局部地图 (ikd-Tree)
+    // 工程2中对应的是 voxel_map.clear()。在Project 1中对应重建 ikd-Tree。
+    // 必须清空旧点，因为它们是基于旧的(有漂移的)位置插入的。
     LOG_INFO_F(
-        "\033[1;32mPeriodic Alignment successful! Refinement applied.\033[0m");
+        "\033[1;33mResetting local map (ikd-Tree) to apply correction.\033[0m");
+    ikdtree = KD_TREE<PointType>();
+    // 重建树需要重新积累点，接下来的几帧会重新初始化树
+
   } else {
-    LOG_WARN_F("Periodic Alignment failed to converge.");
+    LOG_WARN_F("Periodic Alignment failed. Score: %.4f", score);
   }
 
+  // 10. 归档处理完的关键帧
   new_keyframes_all_.insert(new_keyframes_all_.end(), new_keyframes_.begin(),
                             new_keyframes_.end());
   new_keyframes_.clear();
   motion_keyframe_count_ = 0;
+
+  // 强制刷新日志，防止崩溃时丢失最后的信息
+  fflush(stdout);
 }
 
 bool LaserMappingNode::loadExistingMap(const std::string& map_path) {

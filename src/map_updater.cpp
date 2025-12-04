@@ -202,7 +202,7 @@ PointCloudXYZI::Ptr MapUpdater::findTargetPointsForICP(
       voxels_to_search;
   std::unordered_set<std::string> pcds_to_load;
 
-  // 步骤1: 确定所有源关键帧覆盖的体素区域
+  // 1. 确定所有源关键帧覆盖的体素区域
   for (const auto& src_kf : new_keyframes) {
     PointCloudXYZI::Ptr source_cloud_body = src_kf.getCloud();
     if (source_cloud_body->empty()) continue;
@@ -223,7 +223,7 @@ PointCloudXYZI::Ptr MapUpdater::findTargetPointsForICP(
     }
   }
 
-  // 步骤2: 从索引中收集所有需要加载的PCD文件路径
+  // 2. 从索引中收集所有需要加载的PCD文件路径
   for (const auto& voxel_loc : voxels_to_search) {
     auto it = voxel_map_index.find(voxel_loc);
     if (it != voxel_map_index.end()) {
@@ -234,11 +234,15 @@ PointCloudXYZI::Ptr MapUpdater::findTargetPointsForICP(
   }
 
   if (pcds_to_load.empty()) {
-    LOG_WARN("[WARN] No PCD files found in the vicinity of the current scan.");
+    LOG_WARN_F(
+        "[WARN] No PCD files found in the vicinity of the current scan.");
     return target_cloud;
   }
 
-  // 步骤3: 加载、变换并聚合点云
+  // 3. 加载、变换并聚合点云
+  // [优化] 预留空间避免频繁扩容
+  target_cloud->points.reserve(pcds_to_load.size() * 8000);
+
   for (const auto& pcd_path : pcds_to_load) {
     auto kf_it = std::find_if(
         keyframes_db.begin(), keyframes_db.end(),
@@ -248,29 +252,47 @@ PointCloudXYZI::Ptr MapUpdater::findTargetPointsForICP(
       PointCloudXYZI::Ptr temp_cloud = kf_it->getCloud();
       if (temp_cloud->empty()) continue;
 
-      PointCloudXYZI::Ptr transformed_cloud(new PointCloudXYZI());
+      // 提取变换矩阵，减少内层循环计算量
+      Eigen::Matrix3d R = kf_it->pose.rotationMatrix();
+      Eigen::Vector3d t = kf_it->pose.translation();
+
       for (const auto& p_body : temp_cloud->points) {
+        // 坐标变换: Lidar Body -> IMU Body -> World
         V3D p_lidar_body(p_body.x, p_body.y, p_body.z);
         V3D p_imu_body = m_ext_r * p_lidar_body + m_ext_t;
-        V3D p_world = kf_it->pose.rotationMatrix() * p_imu_body +
-                      kf_it->pose.translation();
+        V3D p_world = R * p_imu_body + t;
+
         PointType p_w;
         p_w.x = p_world.x();
         p_w.y = p_world.y();
         p_w.z = p_world.z();
         p_w.intensity = p_body.intensity;
-        transformed_cloud->points.push_back(p_w);
+
+        // =========== 【关键修复】 ===========
+        // 必须初始化法向量字段为 0，防止内存中的随机 NaN 导致 PCL 算法崩溃
+        p_w.normal_x = 0.0f;
+        p_w.normal_y = 0.0f;
+        p_w.normal_z = 0.0f;
+        p_w.curvature = 0.0f;
+        // ===================================
+
+        target_cloud->points.push_back(p_w);
       }
-      *target_cloud += *transformed_cloud;
     }
   }
+
+  // =========== 【关键修复】 ===========
+  // 必须设置点云属性，否则 KDTree 构建会失败
+  target_cloud->width = target_cloud->points.size();
+  target_cloud->height = 1;
+  target_cloud->is_dense = true;
+  // ===================================
 
   std::cout << "[INFO] Loaded " << pcds_to_load.size() << " PCDs, aggregated "
             << target_cloud->size() << " points for ICP target." << std::endl;
   return target_cloud;
 }
 
-// 为 VoxelKey 定义哈希函数，用于 convertKeyframesToPCL
 struct VoxelKey {
   int64_t x, y, z;
 
