@@ -47,6 +47,7 @@ def generate_launch_description():
             config_file_camera,  # 加载相机参数
             {"use_sim_time": use_sim_time},  # [修改] 使用传入的参数，而不是硬编码 False
         ],
+        # prefix=["xterm -e gdb -ex run --args"],
     )
 
     # 2. RViz2 节点

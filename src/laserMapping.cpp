@@ -685,14 +685,21 @@ void LaserMappingNode::timer_callback() {
 }
 
 void LaserMappingNode::periodicAlignment() {
-  LOG_INFO_F("Starting Periodic Alignment...");
-  // 0. 基本检查
+  // [Debug] 强制打印日志以确认函数是否被安全调用
+  printf("[DEBUG] Entering periodicAlignment...\n");
+  fflush(stdout);
+
   if (!is_update_mode_ || motion_keyframe_count_ < periodic_align_interval_) {
     return;
   }
 
+  // ==============================================================================
   // 1. 聚合源点云 (Source: Current SLAM World)
+  // [核心修复] 保留手动变换，避开 pcl::transformPointCloud 内部的
+  // SIMD/内存对齐崩溃
+  // ==============================================================================
   PointCloudXYZI::Ptr source_cloud_world(new PointCloudXYZI());
+
   for (const auto& kf_new : new_keyframes_) {
     PointCloudXYZI::Ptr kf_cloud = kf_new.getCloud();
     if (kf_cloud->empty()) continue;
@@ -704,8 +711,6 @@ void LaserMappingNode::periodicAlignment() {
   }
 
   if (source_cloud_world->empty()) {
-    LOG_WARN_F("Periodic Alignment: Source cloud empty. Clearing buffer.");
-    // 清理缓冲区防止堆积
     new_keyframes_all_.insert(new_keyframes_all_.end(), new_keyframes_.begin(),
                               new_keyframes_.end());
     new_keyframes_.clear();
@@ -713,7 +718,9 @@ void LaserMappingNode::periodicAlignment() {
     return;
   }
 
+  // ==============================================================================
   // 2. 获取目标点云 (Target: Global Map)
+  // ==============================================================================
   PointCloudXYZI::Ptr target_cloud = map_updater_->findTargetPointsForICP(
       new_keyframes_, voxel_map_index, original_map_keyframes_,
       periodic_align_min_dist_);
@@ -725,8 +732,9 @@ void LaserMappingNode::periodicAlignment() {
     return;
   }
 
-  // 3. [关键一致性] 体素降采样 (Voxel Grid Filter 0.5m)
-  // 这步能显著减少点数，防止 ICP 计算过载导致的崩溃
+  // ==============================================================================
+  // 3. 执行 ICP 配准
+  // ==============================================================================
   pcl::VoxelGrid<PointType> voxel_filter;
   voxel_filter.setLeafSize(0.5f, 0.5f, 0.5f);
 
@@ -739,34 +747,25 @@ void LaserMappingNode::periodicAlignment() {
   voxel_filter.filter(*target_cloud_filtered);
 
   if (source_cloud_filtered->empty() || target_cloud_filtered->empty()) {
-    LOG_WARN_F("Periodic Alignment: Clouds empty after filtering.");
     return;
   }
 
-  // 4. [关键一致性] 计算初始猜测 (Initial Guess using NDT/PCL Pose)
   Eigen::Matrix4f initial_guess_matrix = Eigen::Matrix4f::Identity();
-  bool use_initial_guess = false;
-
   if (initial_pose_received_ && !new_keyframes_.empty()) {
     Sophus::SE3d T_world_ndt;
     {
       std::lock_guard<std::mutex> lock(mtx_initial_pose);
       T_world_ndt = initial_pose_;
     }
-    // T_guess = T_map_slam = T_world_ndt * T_world_slam_inverse
     Sophus::SE3d T_world_slam = new_keyframes_.back().pose;
     Sophus::SE3d T_guess = T_world_ndt * T_world_slam.inverse();
-
     initial_guess_matrix = T_guess.matrix().cast<float>();
-    use_initial_guess = true;
-    LOG_INFO_F("Using external pose as initial guess.");
   }
 
-  // 5. 执行 ICP
   pcl::IterativeClosestPoint<PointType, PointType> icp;
   icp.setInputSource(source_cloud_filtered);
   icp.setInputTarget(target_cloud_filtered);
-  icp.setMaxCorrespondenceDistance(2.0);  // 稍微放宽范围
+  icp.setMaxCorrespondenceDistance(1.5);
   icp.setMaximumIterations(50);
   icp.setTransformationEpsilon(1e-6);
   icp.setEuclideanFitnessEpsilon(1e-6);
@@ -779,65 +778,68 @@ void LaserMappingNode::periodicAlignment() {
     return;
   }
 
+  // ==============================================================================
+  // 4. 对齐后处理
+  // ==============================================================================
   bool converged = icp.hasConverged();
   double score = icp.getFitnessScore();
 
-  // 6. 对齐后处理
-  if (converged && score < 0.6) {  // 阈值参考工程2
+  if (converged && score < 0.6) {
     Eigen::Matrix4d T_final_mat = icp.getFinalTransformation().cast<double>();
 
-    // [防崩溃] 检查 NaN
     if (T_final_mat.array().isNaN().any()) {
       LOG_ERROR_F("ICP result contains NaN!");
       return;
     }
 
-    // [防崩溃] 使用四元数归一化构造 SE3
     Eigen::Matrix3d R_final = T_final_mat.block<3, 3>(0, 0);
     Eigen::Vector3d t_final = T_final_mat.block<3, 1>(0, 3);
     Eigen::Quaterniond q_final(R_final);
-    q_final.normalize();  // 必须归一化！
+    q_final.normalize();
 
     Sophus::SE3d T_map_slam(q_final, t_final);
 
     LOG_INFO_F("\033[1;32mPeriodic Alignment Success! Score: %.4f\033[0m",
                score);
 
-    // 7. [关键一致性] 应用校正到当前批次关键帧
+    // 更新关键帧位姿
     for (auto& kf : new_keyframes_) {
       kf.pose = T_map_slam * kf.pose;
     }
 
-    // 8. [关键一致性] 更新当前系统状态 (EKF State)
+    // 更新系统状态
     Sophus::SE3d current_pose_slam(state_point.rot.toRotationMatrix(),
                                    state_point.pos);
     Sophus::SE3d corrected_pose_map = T_map_slam * current_pose_slam;
-
     state_point.rot = corrected_pose_map.unit_quaternion();
     state_point.pos = corrected_pose_map.translation();
-
-    // 更新滤波器状态
     kf.change_x(state_point);
 
-    // 9. [关键一致性] 重置局部地图 (ikd-Tree)
-    // 工程2中对应的是 voxel_map.clear()。在Project 1中对应重建 ikd-Tree。
-    // 必须清空旧点，因为它们是基于旧的(有漂移的)位置插入的。
+    // ==============================================================================
+    // [核心修改] 与工程 2 保持一致：
+    // 1. 移除导致崩溃的 ikdtree = KD_TREE<PointType>();
+    // 2. 增加 voxel_map 清理逻辑
+    // ==============================================================================
     LOG_INFO_F(
-        "\033[1;33mResetting local map (ikd-Tree) to apply correction.\033[0m");
-    ikdtree = KD_TREE<PointType>();
-    // 重建树需要重新积累点，接下来的几帧会重新初始化树
+        "\033[1;33mResetting local voxel map to reflect global "
+        "correction.\033[0m");
+
+    voxel_map.clear();
+
+    // 如果 LaserMappingNode 中有类似 lidar_map_inited 的标志位，可以在这里重置
+    // 但在您提供的代码中，它主要依赖 voxel_map 的状态
+    // 此处移除 ikdtree 的重置，直接避开了 Segmentation Fault
 
   } else {
     LOG_WARN_F("Periodic Alignment failed. Score: %.4f", score);
   }
 
-  // 10. 归档处理完的关键帧
+  // 归档处理完的关键帧
   new_keyframes_all_.insert(new_keyframes_all_.end(), new_keyframes_.begin(),
                             new_keyframes_.end());
   new_keyframes_.clear();
   motion_keyframe_count_ = 0;
 
-  // 强制刷新日志，防止崩溃时丢失最后的信息
   fflush(stdout);
 }
 
